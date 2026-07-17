@@ -5,6 +5,7 @@ members = [
     "crates/plainfeed-server",
     "crates/plainfeed-sync",
     "crates/plainfeed-sync-core",
+    "experiments/wasmtime-run-service",
 ]
 exclude = ["refs/gitoxide", "refs/memmap2", "refs/reqwest"]
 resolver = "3"
