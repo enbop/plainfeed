@@ -345,12 +345,26 @@ pub fn finalize_fast_forward_checkout(
         None => gix::refs::transaction::PreviousValue::MustNotExist,
     };
     let reference_name = format!("refs/heads/{branch}");
-    if let Err(error) = repository.reference(
-        reference_name,
-        remote_oid,
-        constraint,
-        "plainfeed: activate synchronized snapshot",
-    ) {
+    let reference_name = gix::refs::FullName::try_from(reference_name.as_str()).map_err(git_error)?;
+    let committer = repository
+        .committer()
+        .transpose()
+        .map_err(git_error)?
+        .ok_or_else(|| Error::Git("fallback committer is unavailable".to_owned()))?;
+    let edit = gix::refs::transaction::RefEdit {
+        change: gix::refs::transaction::Change::Update {
+            log: gix::refs::transaction::LogChange {
+                mode: gix::refs::transaction::RefLog::AndReference,
+                force_create_reflog: false,
+                message: "plainfeed: activate synchronized snapshot".into(),
+            },
+            expected: constraint,
+            new: gix::refs::Target::Object(remote_oid),
+        },
+        name: reference_name,
+        deref: false,
+    };
+    if let Err(error) = repository.edit_references_as(Some(edit), Some(committer)) {
         restore_index(&index_path, previous_index.as_deref())?;
         return Err(git_error(error));
     }
