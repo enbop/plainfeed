@@ -1,12 +1,11 @@
 [package]
-name = "plainfeed-core"
+name = "plainfeed-sync-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-plainfeed-sync-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 time.workspace = true

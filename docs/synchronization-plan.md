@@ -18,6 +18,18 @@ The first deployment target is `spore-bot/plainfeed-playground` over HTTPS with
 a repository-scoped token inherited by the WASI guest. GitHub is the initial
 test remote, not a storage-format dependency.
 
+External writers must follow the [producer contract](producer-contract.md).
+
+## Implementation status
+
+- Phase 0: the canonical data layout is committed in the local playground
+  checkout and passes the reader's Wasmtime smoke test; publishing the commit
+  remains an explicit remote migration step because it deletes probe files.
+- Phase 1: the provider-independent ownership audit, synchronization metadata,
+  conflict report, dirty journal, and post-rename state markers are implemented
+  with unit tests.
+- Phase 2 is the next implementation step.
+
 ## Runtime topology
 
 Use two WASI components sharing one preopened data checkout:

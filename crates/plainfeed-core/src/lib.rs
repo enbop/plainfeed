@@ -139,6 +139,8 @@ pub enum Error {
     EntryNotFound(String),
     #[error("comment cannot be empty")]
     EmptyComment,
+    #[error("state was persisted but its synchronization marker failed: {0}")]
+    DirtyMarker(#[from] plainfeed_sync_core::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -344,7 +346,9 @@ impl Store {
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
         }
-        result
+        result?;
+        plainfeed_sync_core::DirtyJournal::new(&self.root).mark(&state.entry_id)?;
+        Ok(())
     }
 
     fn state_path(&self, entry_id: &str) -> PathBuf {
@@ -597,6 +601,36 @@ This is **file-backed** content.
         assert!(state.favorite);
         assert_eq!(state.read_at.as_deref(), Some("2026-07-17T01:00:00Z"));
         assert_eq!(state.comments[0].body, "Keep this.");
+    }
+
+    #[test]
+    fn successful_state_replacement_creates_a_dirty_marker() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = Store::open(temporary.path());
+
+        store.write_state(&EntryState::new("hello-wasi")).unwrap();
+
+        let markers = fs::read_dir(temporary.path().join(".plainfeed/dirty"))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(markers.len(), 1);
+        assert!(
+            fs::read_to_string(markers[0].path())
+                .unwrap()
+                .contains("hello-wasi")
+        );
+    }
+
+    #[test]
+    fn failed_state_replacement_does_not_create_a_dirty_marker() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("state/entries/hello-wasi.toml");
+        fs::create_dir_all(&destination).unwrap();
+        let store = Store::open(temporary.path());
+
+        assert!(store.write_state(&EntryState::new("hello-wasi")).is_err());
+        assert!(!temporary.path().join(".plainfeed/dirty").exists());
     }
 
     #[test]

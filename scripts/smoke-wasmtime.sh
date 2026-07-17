@@ -3,6 +3,7 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 PORT=${PLAINFEED_SMOKE_PORT:-18082}
+SOURCE_DATA=${PLAINFEED_SMOKE_DATA:-$ROOT/examples/data}
 DATA=$(mktemp -d "${TMPDIR:-/tmp}/plainfeed-smoke.XXXXXX")
 LOG="$DATA/wasmtime.log"
 SERVER_PID=
@@ -16,7 +17,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-cp -R "$ROOT/examples/data/." "$DATA/"
+cp -R "$SOURCE_DATA/." "$DATA/"
 
 cargo build \
   --manifest-path "$ROOT/Cargo.toml" \

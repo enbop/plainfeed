@@ -2,6 +2,7 @@
 members = [
     "crates/plainfeed-core",
     "crates/plainfeed-server",
+    "crates/plainfeed-sync-core",
 ]
 resolver = "3"
 
@@ -13,6 +14,7 @@ repository = "https://github.com/spore-bot/plainfeed"
 
 [workspace.dependencies]
 plainfeed-core = { path = "crates/plainfeed-core" }
+plainfeed-sync-core = { path = "crates/plainfeed-sync-core" }
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.17"
 time = { version = "0.3.44", features = ["formatting", "parsing"] }
