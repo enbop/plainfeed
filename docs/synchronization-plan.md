@@ -22,13 +22,16 @@ External writers must follow the [producer contract](producer-contract.md).
 
 ## Implementation status
 
-- Phase 0: the canonical data layout is committed in the local playground
-  checkout and passes the reader's Wasmtime smoke test; publishing the commit
-  remains an explicit remote migration step because it deletes probe files.
+- Phase 0: the canonical data layout is published at playground commit
+  `ff2845b` and passes the reader's Wasmtime smoke test.
 - Phase 1: the provider-independent ownership audit, synchronization metadata,
   conflict report, dirty journal, and post-rename state markers are implemented
   with unit tests.
-- Phase 2 is the next implementation step.
+- Phase 2: the production `plainfeed-git` crate performs bounded authenticated
+  HTTPS fetches under Wasmtime, inspects the remote tip and state tree, and
+  passes repeated-fetch, invalid-credential, untouched-worktree, and native
+  `git fsck --full` checks against the real playground repository.
+- Phase 3 is the next implementation step.
 
 ## Runtime topology
 
