@@ -9,11 +9,15 @@ use thiserror::Error;
 
 mod fetch;
 mod http;
+mod push;
+mod state_commit;
 
 pub use fetch::{
     FetchOutcome, FetchRequest, changed_paths, commit_root_entry_oid, export_remote_snapshot,
     fetch, finalize_fast_forward_checkout, reference_oid,
 };
+pub use push::{PushOutcome, push_one_commit};
+pub use state_commit::{StateCommit, create_state_commit};
 
 #[derive(Clone)]
 pub struct Credentials {
@@ -158,6 +162,10 @@ pub enum Error {
     Git(String),
     #[error("remote tip {remote} is not a descendant of local base {base}")]
     NonFastForward { base: String, remote: String },
+    #[error("push candidate parent {parent} does not match advertised remote tip {remote}")]
+    StaleRemote { parent: String, remote: String },
+    #[error("generated push pack uses {bytes} bytes, over the {limit}-byte limit")]
+    PushTooLarge { bytes: usize, limit: usize },
 }
 
 fn directory_bytes(path: &Path) -> Result<u64, Error> {

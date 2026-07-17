@@ -139,6 +139,8 @@ pub enum Error {
     EntryNotFound(String),
     #[error("comment cannot be empty")]
     EmptyComment,
+    #[error("unexpected reader-state path: {path}")]
+    InvalidStatePath { path: PathBuf },
     #[error("state was persisted but its synchronization marker failed: {0}")]
     DirtyMarker(#[from] plainfeed_sync_core::Error),
 }
@@ -160,6 +162,46 @@ impl Store {
     pub fn validate(&self) -> Result<(), Error> {
         self.entries()?;
         self.channels()?;
+        self.validate_state()?;
+        Ok(())
+    }
+
+    pub fn validate_state(&self) -> Result<(), Error> {
+        let directory = self.root.join("state/entries");
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(Error::Io {
+                    path: directory,
+                    source,
+                });
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|source| Error::Io {
+                path: directory.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if !entry
+                .file_type()
+                .map_err(|source| Error::Io {
+                    path: path.clone(),
+                    source,
+                })?
+                .is_file()
+                || path.extension().and_then(|extension| extension.to_str()) != Some("toml")
+            {
+                return Err(Error::InvalidStatePath { path });
+            }
+            let entry_id = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| Error::InvalidStatePath { path: path.clone() })?;
+            validate_id(entry_id, &path)?;
+            self.state(entry_id)?;
+        }
         Ok(())
     }
 
@@ -670,6 +712,23 @@ producer_hint = "keep-me"
         store.set_favorite("hello-wasi", true).unwrap();
         let rewritten = fs::read_to_string(state_directory.join("hello-wasi.toml")).unwrap();
         assert!(rewritten.contains("producer_hint = \"keep-me\""));
+    }
+
+    #[test]
+    fn validates_orphaned_state_files_before_publication() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_directory = temporary.path().join("state/entries");
+        fs::create_dir_all(&state_directory).unwrap();
+        fs::write(
+            state_directory.join("orphan.toml"),
+            r#"format = "plainfeed.state/v1"
+entry_id = "orphan"
+read_at = "not-a-timestamp"
+"#,
+        )
+        .unwrap();
+
+        assert!(Store::open(temporary.path()).validate_state().is_err());
     }
 
     #[test]

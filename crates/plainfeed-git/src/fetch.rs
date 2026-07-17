@@ -345,7 +345,8 @@ pub fn finalize_fast_forward_checkout(
         None => gix::refs::transaction::PreviousValue::MustNotExist,
     };
     let reference_name = format!("refs/heads/{branch}");
-    let reference_name = gix::refs::FullName::try_from(reference_name.as_str()).map_err(git_error)?;
+    let reference_name =
+        gix::refs::FullName::try_from(reference_name.as_str()).map_err(git_error)?;
     let committer = repository
         .committer()
         .transpose()

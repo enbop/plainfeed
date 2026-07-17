@@ -4,7 +4,8 @@ use std::{fs, path::PathBuf};
 
 use plainfeed_core::Store;
 use plainfeed_sync_core::{
-    ConflictReport, SyncState, activate_staged_snapshot_with_finalize, audit_remote_changes,
+    ConflictReport, DirtyJournal, SyncState, activate_staged_snapshot_with_finalize,
+    audit_plainfeed_changes, audit_remote_changes,
 };
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -34,6 +35,17 @@ pub enum Error {
     Audit(#[from] plainfeed_sync_core::AuditError),
     #[error("snapshot activation failed: {0}")]
     Activation(#[from] plainfeed_sync_core::Error),
+    #[error("state publication lost the remote race three times")]
+    PushRetryExhausted,
+    #[error("reader state is invalid: {0}")]
+    InvalidState(#[from] plainfeed_core::Error),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PublishOutcome {
+    NoDirtyState,
+    AlreadyPublished,
+    Pushed(plainfeed_git::PushOutcome),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,6 +69,32 @@ pub fn pull_is_due(command: SyncCommand, last_pull_at: Option<&str>, now: Offset
             now - last_pull_at >= time::Duration::minutes(5)
         }
     }
+}
+
+pub fn state_publication_is_due(
+    command: SyncCommand,
+    marker_names: &[String],
+    now: OffsetDateTime,
+) -> bool {
+    if marker_names.is_empty() || command == SyncCommand::Status {
+        return false;
+    }
+    if command == SyncCommand::Force {
+        return true;
+    }
+    let mut timestamps = marker_names.iter().filter_map(|name| {
+        name.split_once('-')
+            .and_then(|(timestamp, _)| u128::from_str_radix(timestamp, 16).ok())
+            .and_then(|timestamp| i128::try_from(timestamp).ok())
+    });
+    let Some(first) = timestamps.next() else {
+        return true;
+    };
+    let (oldest, newest) = timestamps.fold((first, first), |(oldest, newest), timestamp| {
+        (oldest.min(timestamp), newest.max(timestamp))
+    });
+    let now = now.unix_timestamp_nanos();
+    now.saturating_sub(newest) >= 30_000_000_000 || now.saturating_sub(oldest) >= 300_000_000_000
 }
 
 pub async fn run_pull_cycle(
@@ -111,6 +149,130 @@ pub async fn run_pull_cycle(
     state.last_error = None;
     state.write_to(&repository_root)?;
     Ok(true)
+}
+
+pub async fn publish_state(
+    repository_root: impl Into<PathBuf>,
+    remote: plainfeed_git::Remote,
+    now: OffsetDateTime,
+) -> Result<PublishOutcome, Error> {
+    let repository_root = repository_root.into();
+    let journal = DirtyJournal::new(&repository_root);
+    let dirty_snapshot = journal.snapshot()?;
+    if dirty_snapshot.is_empty() {
+        return Ok(PublishOutcome::NoDirtyState);
+    }
+    Store::open(&repository_root).validate_state()?;
+    let remote_url = remote.url().to_owned();
+    let mut state = SyncState::read_from(&repository_root)?
+        .unwrap_or_else(|| SyncState::new("origin", "refs/heads/main"));
+    let timestamp = now
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+
+    for attempt in 0..3 {
+        let local_tip = plainfeed_git::reference_oid(&repository_root, "refs/heads/main")?;
+        let trusted_state_tree = match state.last_state_tree_oid.clone() {
+            Some(tree) => tree,
+            None => plainfeed_git::commit_root_entry_oid(&repository_root, &local_tip, "state")?
+                .ok_or(Error::MissingStateTree)?,
+        };
+        let fetched = plainfeed_git::fetch(plainfeed_git::FetchRequest::main(
+            &repository_root,
+            remote.clone(),
+        ))
+        .await?;
+        let base = state
+            .last_remote_oid
+            .as_deref()
+            .unwrap_or(local_tip.as_str());
+        let remote_paths =
+            plainfeed_git::changed_paths(&repository_root, Some(base), &fetched.remote_tip)?;
+        audit_remote_changes(
+            remote_paths.iter().map(String::as_str),
+            fetched.state_tree.as_deref(),
+            Some(&trusted_state_tree),
+        )?;
+
+        if fetched.remote_tip != local_tip {
+            activate_fetched_snapshot(ActivationRequest {
+                repository_root: repository_root.clone(),
+                branch: "main".to_owned(),
+                expected_base: local_tip,
+                remote_tip: fetched.remote_tip.clone(),
+                trusted_state_tree,
+            })?;
+            state = SyncState::read_from(&repository_root)?.unwrap_or(state);
+        }
+
+        let candidate_ref = format!("refs/plainfeed/state-candidate-{attempt}");
+        let candidate = plainfeed_git::create_state_commit(
+            &repository_root,
+            &fetched.remote_tip,
+            repository_root.join("state"),
+            &candidate_ref,
+            now.unix_timestamp(),
+        )?;
+        let Some(candidate) = candidate else {
+            state.remote_url = Some(remote_url.clone());
+            finalize_publication_state(
+                &repository_root,
+                &mut state,
+                &fetched.remote_tip,
+                fetched.state_tree,
+                &timestamp,
+            )?;
+            journal.clear_snapshot(&dirty_snapshot)?;
+            return Ok(PublishOutcome::AlreadyPublished);
+        };
+        audit_plainfeed_changes(candidate.changed_paths.iter().map(String::as_str))?;
+        match plainfeed_git::push_one_commit(
+            remote.clone(),
+            &repository_root,
+            &candidate_ref,
+            "refs/heads/main",
+            Default::default(),
+        )
+        .await
+        {
+            Ok(outcome) => {
+                state.remote_url = Some(remote_url.clone());
+                finalize_publication_state(
+                    &repository_root,
+                    &mut state,
+                    &candidate.commit,
+                    Some(candidate.state_tree),
+                    &timestamp,
+                )?;
+                plainfeed_git::finalize_fast_forward_checkout(
+                    &repository_root,
+                    "main",
+                    Some(&fetched.remote_tip),
+                    &candidate.commit,
+                )?;
+                journal.clear_snapshot(&dirty_snapshot)?;
+                return Ok(PublishOutcome::Pushed(outcome));
+            }
+            Err(plainfeed_git::Error::StaleRemote { .. }) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(Error::PushRetryExhausted)
+}
+
+fn finalize_publication_state(
+    repository_root: &std::path::Path,
+    state: &mut SyncState,
+    remote_tip: &str,
+    state_tree: Option<String>,
+    timestamp: &str,
+) -> Result<(), plainfeed_sync_core::Error> {
+    state.last_remote_oid = Some(remote_tip.to_owned());
+    state.last_state_tree_oid = state_tree;
+    state.last_pull_at = Some(timestamp.to_owned());
+    state.last_push_at = Some(timestamp.to_owned());
+    state.last_error = None;
+    state.write_to(repository_root)
 }
 
 pub fn activate_fetched_snapshot(request: ActivationRequest) -> Result<ActivationOutcome, Error> {
@@ -208,7 +370,10 @@ mod tests {
 
     use gix::{bstr::ByteSlice, objs::tree::EntryKind};
 
-    use super::{ActivationRequest, SyncCommand, activate_fetched_snapshot, pull_is_due};
+    use super::{
+        ActivationRequest, SyncCommand, activate_fetched_snapshot, pull_is_due,
+        state_publication_is_due,
+    };
 
     const OLD_ENTRY: &str = r#"+++
 format = "plainfeed.entry/v1"
@@ -270,6 +435,38 @@ favorite = true
         assert!(pull_is_due(
             SyncCommand::Tick,
             Some("2026-07-17T01:05:00Z"),
+            now
+        ));
+    }
+
+    #[test]
+    fn state_publication_batches_idle_markers_but_caps_continuous_mutation() {
+        let now = time::OffsetDateTime::from_unix_timestamp(600).unwrap();
+        let marker = |seconds: u128, suffix: &str| {
+            format!(
+                "{:032x}-0000000000000000-{suffix}.toml",
+                seconds * 1_000_000_000
+            )
+        };
+        assert!(!state_publication_is_due(SyncCommand::Tick, &[], now));
+        assert!(state_publication_is_due(
+            SyncCommand::Force,
+            &[marker(599, "new")],
+            now
+        ));
+        assert!(!state_publication_is_due(
+            SyncCommand::Tick,
+            &[marker(571, "active")],
+            now
+        ));
+        assert!(state_publication_is_due(
+            SyncCommand::Tick,
+            &[marker(570, "idle")],
+            now
+        ));
+        assert!(state_publication_is_due(
+            SyncCommand::Tick,
+            &[marker(300, "old"), marker(599, "new")],
             now
         ));
     }

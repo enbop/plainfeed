@@ -1,7 +1,9 @@
 use std::{env, error::Error, path::PathBuf};
 
 use plainfeed_git::{Credentials, Remote};
-use plainfeed_sync::{SyncCommand, run_pull_cycle};
+use plainfeed_sync::{
+    PublishOutcome, SyncCommand, publish_state, run_pull_cycle, state_publication_is_due,
+};
 use plainfeed_sync_core::{DirtyJournal, SyncState};
 use time::OffsetDateTime;
 
@@ -34,13 +36,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let ran = runtime.block_on(run_pull_cycle(
-        command,
-        &repository_root,
-        remote,
-        OffsetDateTime::now_utc(),
-    ))?;
-    println!("pull={}", if ran { "completed" } else { "not-due" });
+    let now = OffsetDateTime::now_utc();
+    let markers = DirtyJournal::new(&repository_root).snapshot()?;
+    if state_publication_is_due(command, &markers, now) {
+        let outcome = runtime.block_on(publish_state(&repository_root, remote, now))?;
+        let label = match outcome {
+            PublishOutcome::NoDirtyState => "no-dirty-state",
+            PublishOutcome::AlreadyPublished => "already-published",
+            PublishOutcome::Pushed(_) => "completed",
+        };
+        println!("pull=completed");
+        println!("push={label}");
+    } else {
+        let ran = runtime.block_on(run_pull_cycle(command, &repository_root, remote, now))?;
+        println!("pull={}", if ran { "completed" } else { "not-due" });
+        println!("push=not-due");
+    }
     Ok(())
 }
 

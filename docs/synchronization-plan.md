@@ -40,7 +40,13 @@ External writers must follow the [producer contract](producer-contract.md).
   Real Wasmtime tests cover forced and no-change pulls, five-minute tick
   throttling, offline failure without worktree changes, persisted errors, and
   recovery. Deployment commands are documented in [deployment.md](deployment.md).
-- Phase 5 is the next implementation step.
+- Phase 5: reader mutations are validated and published as one state-only
+  fast-forward commit by the production receive-pack adapter. The command
+  batches dirty markers, retries a competing content commit from a fresh
+  parent, and clears only the captured markers after success. Wasmtime tests
+  cover deterministic content/push races, offline dirty retention, real GitHub
+  HTTPS/PAT publication, a fresh SSH clone, and native `git fsck --full`.
+- Phase 6 is the next implementation step.
 
 ## Runtime topology
 

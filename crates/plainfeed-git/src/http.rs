@@ -92,11 +92,23 @@ pub(crate) struct Transport {
 
 impl Transport {
     pub(crate) fn new(remote: Remote, limits: FetchLimits) -> Result<Self, Error> {
+        Self::with_protocol(remote, limits, Protocol::V2)
+    }
+
+    pub(crate) fn for_push(remote: Remote, limits: FetchLimits) -> Result<Self, Error> {
+        Self::with_protocol(remote, limits, Protocol::V1)
+    }
+
+    fn with_protocol(
+        remote: Remote,
+        limits: FetchLimits,
+        protocol: Protocol,
+    ) -> Result<Self, Error> {
         Ok(Self {
             client: client()?,
             url: remote.url.trim_end_matches('/').to_owned(),
-            desired_protocol: Protocol::V2,
-            actual_protocol: Protocol::V2,
+            desired_protocol: protocol,
+            actual_protocol: protocol,
             service: None,
             line_provider: None,
             credentials: remote.credentials,
@@ -119,7 +131,7 @@ impl Transport {
     }
 
     fn request_headers(&self, service: Service) -> Vec<(&'static str, String)> {
-        vec![
+        let mut headers = vec![
             ("user-agent", "plainfeed/0.1".into()),
             (
                 "content-type",
@@ -129,11 +141,14 @@ impl Transport {
                 "accept",
                 format!("application/x-{}-result", service.as_str()),
             ),
-            (
+        ];
+        if self.actual_protocol != Protocol::V1 {
+            headers.push((
                 "git-protocol",
                 format!("version={}", self.actual_protocol as usize),
-            ),
-        ]
+            ));
+        }
+        headers
     }
 }
 
@@ -167,11 +182,13 @@ impl client::async_io::Transport for Transport {
             None => (*key).to_owned(),
         }));
 
-        let request = self
+        let mut request = self
             .client
             .get(self.endpoint(&format!("info/refs?service={}", service.as_str())))
-            .header("user-agent", "plainfeed/0.1")
-            .header("git-protocol", protocol_parameters.join(":"));
+            .header("user-agent", "plainfeed/0.1");
+        if service != Service::ReceivePack {
+            request = request.header("git-protocol", protocol_parameters.join(":"));
+        }
         let response = self
             .authenticate(request)
             .send()

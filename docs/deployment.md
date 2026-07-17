@@ -37,9 +37,11 @@ wasmtime serve \
 ```
 
 Have the host scheduler invoke the same sync component with `tick` every 30
-seconds. A tick performs no network request until the last successful pull is
-at least five minutes old. `force` bypasses that interval, while `status` never
-uses the network and does not require credentials:
+seconds. A tick publishes dirty reader state after 30 idle seconds or five
+minutes of continuous mutations. Without due state, it performs no network
+request until the last successful pull is at least five minutes old. `force`
+immediately performs the applicable pull or state publication cycle, while
+`status` never uses the network and does not require credentials:
 
 ```sh
 wasmtime run \
