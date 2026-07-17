@@ -142,8 +142,9 @@ transitions implemented in `plainfeed-core`.
 
 ### 3. Prove the WASI runtime
 
-Status: initial `wasi:http/proxy` component verified with Wasmtime 43 using a
-preopened writable `/data` directory.
+Status: the primary service uses Axum and Tokio networking in one long-lived
+`wasm32-wasip2` command under Wasmtime 46. The earlier `wasi:http/proxy`
+component remains a compatibility fallback.
 
 - Compile the core and a minimal server target for the chosen WASI profile.
 - Run it under Wasmtime with a mounted content directory.
@@ -177,8 +178,8 @@ and pull-only path come before state publication.
 - Comment edit and deletion history.
 
 The v1 slice resolves the other initial choices: one Markdown file with TOML
-front matter per entry, one TOML state file per entry, a WASI HTTP proxy
-component, server-rendered HTML progressively enhanced with htmx, and one
+front matter per entry, one TOML state file per entry, a long-running Axum
+WASIp2 service, server-rendered HTML progressively enhanced with htmx, and one
 combined data repository with directory ownership for synchronization.
 
 ## Non-goals for the First Version

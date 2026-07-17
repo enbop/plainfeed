@@ -60,21 +60,27 @@ External writers must follow the [producer contract](producer-contract.md).
   offline recovery, CAS exhaustion, and native `git fsck --full` validation.
   The operational and native Git fallback procedures are documented in
   [operations.md](operations.md).
+- Service runtime: `plainfeed-service.wasm` owns an Axum listener and runs the
+  existing pull/publication policy as a non-`Send` local Tokio task. Wasmtime 46
+  fixtures prove startup content activation and automatic state publication
+  without a host timer. The proxy reader and one-shot sync command remain
+  recovery-compatible fallbacks.
 
 ## Runtime topology
 
-Use two WASI components sharing one preopened data checkout:
+The primary deployment is one long-lived WASI command:
 
 ```text
-plainfeed-reader.wasm       wasmtime serve; reads content/config, writes state
-plainfeed-sync.wasm         wasmtime run; fetches and publishes Git changes
-           │
-           └── /data        checkout of plainfeed-playground
+plainfeed-service.wasm      wasmtime run
+  ├── Axum HTTP reader
+  ├── Tokio synchronization loop
+  └── /data                 checkout of plainfeed-playground
 ```
 
-`wasi:http/proxy` has no autonomous startup or timer callback, so a host timer
-invokes the sync command. Keeping synchronization out of reader requests also
-prevents Git or network failures from delaying normal reading.
+The single-threaded runtime schedules Git networking independently of reader
+requests. The update lock still prevents reads during the short activation
+transition. `plainfeed-server.wasm` under `wasmtime serve` plus the host-timed
+`plainfeed-sync.wasm` remains a compatibility and recovery topology.
 
 ## Repository contract
 

@@ -8,6 +8,10 @@ repository.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = ["proxy-component"]
+proxy-component = ["dep:wasip2"]
+
 [dependencies]
 plainfeed-core.workspace = true
 plainfeed-sync-core.workspace = true
@@ -17,7 +21,7 @@ time.workspace = true
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Wasmtime 43 serves the stable WASI 0.2 HTTP world. This binding revision is
 # compatible with its linker and keeps the component on the WASIp2 ABI.
-wasip2 = "=1.0.1"
+wasip2 = { version = "=1.0.1", optional = true }
 
 [dev-dependencies]
 tempfile = "3.23.0"

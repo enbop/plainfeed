@@ -1,9 +1,8 @@
 # Plainfeed
 
 Plainfeed is a personal, file-first information stream and reading server. It
-serves Markdown entries, records reader state in TOML, and runs as a WASI HTTP
-component under Wasmtime. It has no database and no runtime dependency on Git
-or GitHub.
+serves Markdown entries, records reader state in TOML, and runs as a long-lived
+WASIp2 service under Wasmtime. It has no database and is not coupled to GitHub.
 
 The first usable slice supports:
 
@@ -35,23 +34,31 @@ that can be copied as the starting point for a data repository.
 Requirements used by the initial implementation:
 
 - Rust with the `wasm32-wasip2` target.
-- Wasmtime 43 or a compatible runtime with WASI HTTP 0.2 support.
+- Wasmtime 46 or a compatible runtime with WASIp2 socket support.
 
-Build and serve the component:
+Build and run the combined Axum reader and synchronization service:
 
 ```bash
-cargo build --release -p plainfeed-server --target wasm32-wasip2
-wasmtime serve \
-  -S cli=y \
-  --addr 127.0.0.1:8080 \
-  --dir examples/data::/data \
-  target/wasm32-wasip2/release/plainfeed_server.wasm
+RUSTFLAGS="--cfg tokio_unstable" cargo build --release \
+  -p plainfeed-service --target wasm32-wasip2
+wasmtime run \
+  -S inherit-network=y \
+  -S allow-ip-name-lookup=y \
+  --dir /path/to/plainfeed-data::/data \
+  target/wasm32-wasip2/release/plainfeed-service.wasm \
+  127.0.0.1:8080 /data
 ```
 
-Open <http://127.0.0.1:8080/>. The guest always reads `/data`; the `--dir`
-mapping selects the host directory and grants the component file access. The
-`-S cli=y` capability is required for filesystem, clock, and standard I/O
-imports. No network capability is granted to the component itself.
+Open <http://127.0.0.1:8080/>. The guest owns its Tokio TCP listener and runs
+the synchronization loop in the same single-threaded runtime. It forces a pull
+at startup, evaluates local work every 30 seconds, pulls remote content at most
+every five minutes, and batches reader state for publication after 30 idle
+seconds or five minutes of continuous changes. No host timer is required.
+
+Set `PLAINFEED_REMOTE_URL` and the generic Git credentials or
+`PLAINFEED_GITHUB_TOKEN` described in [deployment.md](docs/deployment.md) for a
+synchronized data checkout. Without a configured remote the same service runs
+as a local-only reader.
 
 Use a copy of `examples/data` if you do not want reader actions to modify the
 tracked fixture.
@@ -62,6 +69,7 @@ tracked fixture.
 cargo fmt --all -- --check
 cargo test --workspace
 scripts/smoke-wasmtime.sh
+scripts/smoke-wasmtime-service.sh
 ```
 
 The smoke test builds the WASIp2 component, serves a temporary copy of the
@@ -80,7 +88,8 @@ store. The page still renders useful content before JavaScript runs. See
 
 ```text
 crates/plainfeed-core/    # Format, indexing, and state transitions
-crates/plainfeed-server/  # HTML rendering and WASI HTTP adapter
+crates/plainfeed-server/  # HTTP-neutral reader rendering and proxy fallback
+crates/plainfeed-service/ # Axum listener and autonomous synchronization
 spec/                     # Versioned public file protocol
 web/                      # Static progressive-enhancement assets
 examples/data/            # Example content and state repository

@@ -13,10 +13,24 @@ const STYLE_CSS: &str = include_str!("../../../web/style.css");
 const HTMX_JS: &[u8] = include_bytes!("../../../web/vendor/htmx.min.js");
 
 #[derive(Debug)]
-struct Response {
-    status: u16,
-    content_type: &'static str,
-    body: Cow<'static, [u8]>,
+pub struct Response {
+    pub status: u16,
+    pub content_type: &'static str,
+    pub body: Cow<'static, [u8]>,
+}
+
+/// Handle one reader request without depending on a particular HTTP runtime.
+///
+/// Both the `wasi:http/proxy` compatibility component and the long-running
+/// Axum service use this boundary, so file-format and rendering behavior stay
+/// identical across deployment modes.
+pub fn handle_request(
+    method: &str,
+    path_with_query: &str,
+    body: &[u8],
+    data_root: &Path,
+) -> Response {
+    route(method, path_with_query, body, data_root)
 }
 
 impl Response {
@@ -508,9 +522,9 @@ fn server_error(error: StoreError) -> Response {
     )
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "proxy-component"))]
 mod wasi_http {
-    use super::{Response, route};
+    use super::{Response, handle_request};
     use std::io::{Read, Write};
     use std::path::PathBuf;
     use wasip2::http::types::{
@@ -535,7 +549,7 @@ mod wasi_http {
             let data_root = PathBuf::from("/data");
             let route_method = if method == "HEAD" { "GET" } else { method };
             send(
-                route(route_method, &path, &body, &data_root),
+                handle_request(route_method, &path, &body, &data_root),
                 response_out,
                 method == "HEAD",
             );
@@ -597,10 +611,10 @@ mod wasi_http {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "proxy-component"))]
 use wasi_http::Handler;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "proxy-component"))]
 wasip2::http::proxy::export!(Handler);
 
 #[cfg(test)]

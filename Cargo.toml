@@ -3,6 +3,7 @@ members = [
     "crates/plainfeed-core",
     "crates/plainfeed-git",
     "crates/plainfeed-server",
+    "crates/plainfeed-service",
     "crates/plainfeed-sync",
     "crates/plainfeed-sync-core",
     "experiments/wasmtime-run-service",

@@ -48,9 +48,16 @@ fallback while the combined service is developed.
 
 ## Remaining proof steps
 
-1. Replace the hand-written HTTP probe with a small supported HTTP server stack.
-2. Keep serving health/status requests during a delayed outbound HTTPS fetch.
-3. Integrate the real reader routes without changing the file protocol.
-4. Run the existing synchronization cycle as a background task with a
-   single-writer guard and explicit shutdown behavior.
-5. Add live, server-rendered sync status and control endpoints.
+Completed after the initial probe:
+
+- Axum 0.8.9, Hyper 1.10.1, and Tokio 1.52.4 compile and run under Wasmtime
+  46.0.1.
+- The production service reuses the real reader routes without changing the
+  file protocol.
+- A non-`Send` local task runs the existing synchronization cycle; a Wasmtime
+  fixture proves autonomous startup pull and state publication.
+
+Remaining:
+
+1. Add live, server-rendered sync status and control endpoints.
+2. Define explicit graceful shutdown behavior when WASI signal support permits.
