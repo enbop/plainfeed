@@ -36,17 +36,20 @@ wasmtime 43.0.0 (be23469ec 2026-03-20)
 target: wasm32-wasip2
 gix: 0.85.0
 gitoxide source: 402babd (2026-07-15)
+gitoxide compatibility fork: spore-bot/gitoxide 7b4c806
 reqwest: crates.io 0.13.4, unmodified
 memmap2 source: 7d76ad3 (v0.9.11)
+memmap2 compatibility fork: spore-bot/memmap2 7163e10
 tokio: 1.52.3 with --cfg tokio_unstable
 rustls: 0.23.42
 rustls-rustcrypto: 0.0.2-alpha
 ```
 
-The patched upstream sources are cloned to the ignored `refs/gitoxide` and
-`refs/memmap2` directories. `refs/reqwest` remains only as historical reference
-material and is not used by the build. The writable remote fixture is cloned
-to the ignored `refs/plainfeed-playground` directory.
+The initial experiment used ignored `refs/gitoxide` and `refs/memmap2` source
+checkouts. The production build now consumes exact commits from the public
+`spore-bot` compatibility forks over HTTPS. `refs/reqwest` remains only as
+historical reference material and is not used by the build. The writable remote
+fixture is available through the ignored `refs/plainfeed-playground` path.
 
 ## Capability Results
 
@@ -92,8 +95,9 @@ file, and pushed it to the playground repository's `main` branch.
 
 ## Upstream Compatibility Gaps
 
-The disposable source checkouts contain minimal experimental changes. They are
-intentionally not dependencies of the main project.
+The public compatibility-fork branches contain the minimal changes first
+proved in disposable source checkouts. Plainfeed pins their immutable commit
+IDs; the original patch files remain as historical review artifacts.
 
 ### 1. Permit temporary files on WASI
 

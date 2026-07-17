@@ -7,8 +7,8 @@ repository.workspace = true
 
 [dependencies]
 futures-util = "0.3.31"
-gix = { path = "../../refs/gitoxide/gix", default-features = false, features = ["async-network-client", "index", "sha1", "tree-editor"] }
-gix-pack = { path = "../../refs/gitoxide/gix-pack", default-features = false, features = ["generate", "sha1"] }
+gix = { git = "https://github.com/spore-bot/gitoxide.git", rev = "7b4c806ed6175f21cc4d813ffcb197df95452197", default-features = false, features = ["async-network-client", "index", "sha1", "tree-editor"] }
+gix-pack = { git = "https://github.com/spore-bot/gitoxide.git", rev = "7b4c806ed6175f21cc4d813ffcb197df95452197", default-features = false, features = ["generate", "sha1"] }
 hickory-resolver = { version = "0.26.1", default-features = false, features = ["tokio"] }
 once_cell = "1.21.3"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }

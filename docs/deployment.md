@@ -5,7 +5,6 @@ listener while an autonomous task runs the same synchronization policy over the
 preopened data directory:
 
 ```sh
-scripts/bootstrap-git-dependencies.sh
 RUSTFLAGS="--cfg tokio_unstable" cargo build --release \
   -p plainfeed-service --target wasm32-wasip2
 ```

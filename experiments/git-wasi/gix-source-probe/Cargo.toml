@@ -22,8 +22,8 @@ smart-http-push = [
 ]
 
 [dependencies]
-gix = { path = "../../../refs/gitoxide/gix", default-features = false }
-gix-pack = { path = "../../../refs/gitoxide/gix-pack", default-features = false, features = ["generate", "sha1"], optional = true }
+gix = { git = "https://github.com/spore-bot/gitoxide.git", rev = "7b4c806ed6175f21cc4d813ffcb197df95452197", default-features = false }
+gix-pack = { git = "https://github.com/spore-bot/gitoxide.git", rev = "7b4c806ed6175f21cc4d813ffcb197df95452197", default-features = false, features = ["generate", "sha1"], optional = true }
 hickory-resolver = { version = "0.26.1", default-features = false, features = ["tokio"], optional = true }
 once_cell = { version = "1.21.3", optional = true }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"], optional = true }
@@ -31,4 +31,4 @@ rustls-rustcrypto = { version = "0.0.2-alpha", optional = true }
 tokio = { version = "1.52.3", features = ["net", "rt", "time"], optional = true }
 
 [patch.crates-io]
-memmap2 = { path = "../../../refs/memmap2" }
+memmap2 = { git = "https://github.com/spore-bot/memmap2.git", rev = "7163e105159cb9e95d952e42d390e36ccd83e5c1" }

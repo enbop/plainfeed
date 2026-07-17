@@ -8,9 +8,9 @@ as libgit2.
 
 - `gix-probe`: Gitoxide APIs with separately testable local and network feature
   sets.
-- `gix-source-probe`: the same feature boundary against `refs/gitoxide`, used
-  for disposable upstream-source patches. It requires that reference checkout
-  and is not a standalone reproducible probe.
+- `gix-source-probe`: the same feature boundary against the pinned public
+  compatibility forks. Optional `refs/` checkouts are useful for inspection
+  but are not required to build the probe.
 
 The probes target `wasm32-wasip2` and are intended to run with a repository
 directory preopened in Wasmtime.
@@ -29,18 +29,14 @@ wasmtime run \
   inspect /repo
 ```
 
-## Patched source write probe
+## Compatibility-fork write probe
 
-This requires `refs/gitoxide`, `refs/memmap2`, and the disposable WASI
-compatibility changes documented in the research note. Reqwest is taken
-unmodified from crates.io; the probe injects its own WASIp2-compatible Hickory
-resolver. The remaining experimental diffs are stored in `patches`.
+Cargo fetches the exact public fork commits recorded in the probe manifest.
+Reqwest is taken unmodified from crates.io; the probe injects its own
+WASIp2-compatible Hickory resolver. The original experimental diffs remain in
+`patches` for review.
 
 ```bash
-git clone https://github.com/GitoxideLabs/gitoxide refs/gitoxide
-git clone --branch v0.9.11 https://github.com/RazrFalcon/memmap2-rs refs/memmap2
-git -C refs/gitoxide apply ../../experiments/git-wasi/patches/gitoxide-wasip2.patch
-git -C refs/memmap2 apply ../../experiments/git-wasi/patches/memmap2-wasip2.patch
 cd experiments/git-wasi/gix-source-probe
 RUSTFLAGS="--cfg tokio_unstable" \
   cargo build --target wasm32-wasip2 \
