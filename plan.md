@@ -116,12 +116,18 @@ Wasmtime.
 
 ### 1. Specify the file format
 
+Status: initial v1 slice implemented in `spec/v1.md` with fixtures. Tombstones
+and cross-producer duplicate detection remain later extensions.
+
 - Write the first version of the content and state specifications.
 - Create representative fixtures for articles, short items, generated summaries,
   favorites, read markers, comments, edits, and deletion or tombstone behavior.
 - Define producer requirements and forward-compatibility rules.
 
 ### 2. Build the Rust domain core
+
+Status: initial parser, in-memory ordering, validation, and atomic state
+transitions implemented in `plainfeed-core`.
 
 - Parse and validate fixtures.
 - Build an in-memory index from files.
@@ -131,11 +137,17 @@ Wasmtime.
 
 ### 3. Prove the WASI runtime
 
+Status: initial `wasi:http/proxy` component verified with Wasmtime 43 using a
+preopened writable `/data` directory.
+
 - Compile the core and a minimal server target for the chosen WASI profile.
 - Run it under Wasmtime with a mounted content directory.
 - Document required runtime capabilities and deployment commands.
 
 ### 4. Deliver the reading experience
+
+Status: minimal timeline, safe Markdown rendering, read tracking, favorites,
+and comments implemented with server-rendered HTML and htmx.
 
 - Implement the timeline and entry views.
 - Add read, favorite, comment, and filtering interactions.
@@ -151,15 +163,16 @@ Wasmtime.
 
 ## Open Decisions
 
-- One file per entry versus time-bucketed append-only files.
-- Markdown front matter versus a sidecar metadata file or another text format.
-- State per entry versus compact per-user indexes.
-- Stable identifier generation and duplicate detection across producers.
-- Comment representation and edit history.
-- HTTP implementation compatible with the selected WASI profile.
-- Server-rendered HTML, a small client application, or a hybrid frontend.
+- Stable identifier generation and duplicate detection across independent
+  producers beyond the v1 syntax rules.
+- Tombstones and explicit content deletion semantics.
+- Comment edit and deletion history.
 - Git implementation and merge strategy for concurrent automated writers.
 - Whether content/state repositories are combined by default.
+
+The v1 slice resolves the other initial choices: one Markdown file with TOML
+front matter per entry, one TOML state file per entry, a WASI HTTP proxy
+component, and server-rendered HTML progressively enhanced with htmx.
 
 ## Non-goals for the First Version
 

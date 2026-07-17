@@ -1,0 +1,9 @@
+format = "plainfeed.state/v1"
+entry_id = "20260716-git-wasi"
+read_at = "2026-07-16T13:00:00Z"
+favorite = true
+
+[[comments]]
+id = "comment-20260716-1"
+created_at = "2026-07-16T13:05:00Z"
+body = "Reuse the transport pattern in other WASI projects."

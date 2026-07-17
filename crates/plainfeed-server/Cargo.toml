@@ -1,0 +1,19 @@
+[package]
+name = "plainfeed-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+plainfeed-core.workspace = true
+pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }
+time.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Wasmtime 43 serves the stable WASI 0.2 HTTP world. This binding revision is
+# compatible with its linker and keeps the component on the WASIp2 ABI.
+wasip2 = "=1.0.1"
