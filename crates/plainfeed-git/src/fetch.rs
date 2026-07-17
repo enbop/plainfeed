@@ -30,6 +30,7 @@ pub struct FetchOutcome {
 }
 
 pub async fn fetch(request: FetchRequest) -> Result<FetchOutcome, Error> {
+    validate_branch(&request.branch)?;
     let mut repository = match gix::open(&request.repository) {
         Ok(repository) => repository,
         Err(_) => gix::init(&request.repository).map_err(git_error)?,
@@ -79,6 +80,37 @@ pub async fn fetch(request: FetchRequest) -> Result<FetchOutcome, Error> {
     })
 }
 
-fn git_error(error: impl std::fmt::Display) -> Error {
-    Error::Git(error.to_string())
+fn validate_branch(branch: &str) -> Result<(), Error> {
+    let forbidden = ['~', '^', ':', '?', '*', '[', '\\'];
+    if branch.is_empty()
+        || branch.starts_with('-')
+        || branch.contains("..")
+        || branch
+            .chars()
+            .any(|character| forbidden.contains(&character))
+        || branch
+            .split('/')
+            .any(|segment| segment.is_empty() || segment.ends_with('.'))
+    {
+        return Err(Error::Git(format!("invalid branch name {branch:?}")));
+    }
+    Ok(())
+}
+
+fn git_error(error: impl std::fmt::Display + std::fmt::Debug) -> Error {
+    Error::Git(format!("{error:#?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_branch;
+
+    #[test]
+    fn accepts_normal_branches_and_rejects_refspec_injection() {
+        assert!(validate_branch("main").is_ok());
+        assert!(validate_branch("projects/plainfeed").is_ok());
+        for invalid in ["", "../main", "main..old", "bad:main", "topic/", "-main"] {
+            assert!(validate_branch(invalid).is_err(), "accepted {invalid:?}");
+        }
+    }
 }
