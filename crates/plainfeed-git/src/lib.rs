@@ -10,7 +10,10 @@ use thiserror::Error;
 mod fetch;
 mod http;
 
-pub use fetch::{FetchOutcome, FetchRequest, fetch};
+pub use fetch::{
+    FetchOutcome, FetchRequest, changed_paths, commit_root_entry_oid, export_remote_snapshot,
+    fetch, finalize_fast_forward_checkout,
+};
 
 #[derive(Clone)]
 pub struct Credentials {
@@ -153,6 +156,8 @@ pub enum Error {
     Http(#[from] reqwest::Error),
     #[error("Git operation failed: {0}")]
     Git(String),
+    #[error("remote tip {remote} is not a descendant of local base {base}")]
+    NonFastForward { base: String, remote: String },
 }
 
 fn directory_bytes(path: &Path) -> Result<u64, Error> {

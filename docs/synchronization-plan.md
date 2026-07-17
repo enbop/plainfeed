@@ -31,7 +31,12 @@ External writers must follow the [producer contract](producer-contract.md).
   HTTPS fetches under Wasmtime, inspects the remote tip and state tree, and
   passes repeated-fetch, invalid-credential, untouched-worktree, and native
   `git fsck --full` checks against the real playground repository.
-- Phase 3 is the next implementation step.
+- Phase 3: fetched trees are audited, exported into ignored staging, fully
+  validated, and activated behind an update lock while preserving state. The
+  index and `main` advance with compare-and-swap finalization; validation or
+  finalization failures restore the previous snapshot and write a conflict
+  report. The Wasmtime reader returns a retryable 503 while the lock is held.
+- Phase 4 is the next implementation step.
 
 ## Runtime topology
 

@@ -2201,9 +2201,24 @@ name = "plainfeed-server"
 version = "0.1.0"
 dependencies = [
  "plainfeed-core",
+ "plainfeed-sync-core",
  "pulldown-cmark",
+ "tempfile",
  "time",
  "wasip2",
+]
+
+[[package]]
+name = "plainfeed-sync"
+version = "0.1.0"
+dependencies = [
+ "gix",
+ "plainfeed-core",
+ "plainfeed-git",
+ "plainfeed-sync-core",
+ "tempfile",
+ "thiserror",
+ "time",
 ]
 
 [[package]]

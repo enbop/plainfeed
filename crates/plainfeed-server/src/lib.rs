@@ -47,6 +47,15 @@ impl Response {
 
 fn route(method: &str, path_with_query: &str, body: &[u8], data_root: &Path) -> Response {
     let path = path_with_query.split('?').next().unwrap_or(path_with_query);
+    if plainfeed_sync_core::update_is_locked(data_root)
+        && (path == "/" || path == "/fragments/feed" || method == "POST")
+    {
+        return Response::text(
+            503,
+            "text/plain; charset=utf-8",
+            "Plainfeed is activating a synchronized snapshot; retry shortly.\n",
+        );
+    }
     let selected_channel = query_value(path_with_query, "channel");
     match (method, path) {
         ("GET", "/") => render_feed(data_root, selected_channel.as_deref(), false),
@@ -548,6 +557,20 @@ mod tests {
             parse_form(b"comment=hello+%E4%B8%96%E7%95%8C"),
             [("comment".to_owned(), "hello 世界".to_owned())]
         );
+    }
+
+    #[test]
+    fn data_routes_are_retryable_while_an_update_is_locked() {
+        let temporary = tempfile::tempdir().unwrap();
+        let _lock = plainfeed_sync_core::UpdateLock::acquire(temporary.path()).unwrap();
+
+        let feed = route("GET", "/", &[], temporary.path());
+        let mutation = route("POST", "/entries/example/read", &[], temporary.path());
+        let health = route("GET", "/health", &[], temporary.path());
+
+        assert_eq!(feed.status, 503);
+        assert_eq!(mutation.status, 503);
+        assert_eq!(health.status, 200);
     }
 
     #[test]

@@ -1,0 +1,17 @@
+[package]
+name = "plainfeed-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+plainfeed-core.workspace = true
+plainfeed-git.workspace = true
+plainfeed-sync-core.workspace = true
+thiserror.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+gix = { path = "../../refs/gitoxide/gix", default-features = false, features = ["index", "sha1", "tree-editor"] }
+tempfile = "3.23.0"

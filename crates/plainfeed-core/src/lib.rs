@@ -157,6 +157,12 @@ impl Store {
         &self.root
     }
 
+    pub fn validate(&self) -> Result<(), Error> {
+        self.entries()?;
+        self.channels()?;
+        Ok(())
+    }
+
     pub fn entries(&self) -> Result<Vec<Entry>, Error> {
         let content_root = self.root.join("content");
         let mut paths = Vec::new();

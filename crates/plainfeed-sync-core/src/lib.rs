@@ -119,6 +119,184 @@ pub enum Error {
     Clock,
     #[error("cannot serialize synchronization metadata: {0}")]
     Toml(#[from] toml::ser::Error),
+    #[error("cannot parse synchronization metadata at {path}: {source}")]
+    ParseToml {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("unsupported synchronization metadata format {format:?}")]
+    UnsupportedMetadataFormat { format: String },
+    #[error("another synchronization update holds {path}")]
+    UpdateBusy { path: PathBuf },
+    #[error("staging directory is outside .plainfeed/staging: {path}")]
+    InvalidStaging { path: PathBuf },
+    #[error("staged snapshot validation failed: {0}")]
+    Validation(String),
+    #[error("staged snapshot finalization failed: {0}")]
+    Finalization(String),
+}
+
+#[derive(Debug)]
+pub struct UpdateLock {
+    path: PathBuf,
+}
+
+impl UpdateLock {
+    pub fn acquire(repository_root: impl AsRef<Path>) -> Result<Self, Error> {
+        let metadata = repository_root.as_ref().join(".plainfeed");
+        fs::create_dir_all(&metadata).map_err(|source| Error::Io {
+            path: metadata.clone(),
+            source,
+        })?;
+        let path = metadata.join("update.lock");
+        match fs::create_dir(&path) {
+            Ok(()) => Ok(Self { path }),
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(Error::UpdateBusy { path })
+            }
+            Err(source) => Err(Error::Io { path, source }),
+        }
+    }
+}
+
+impl Drop for UpdateLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.path);
+    }
+}
+
+pub fn update_is_locked(repository_root: impl AsRef<Path>) -> bool {
+    repository_root
+        .as_ref()
+        .join(".plainfeed/update.lock")
+        .is_dir()
+}
+
+pub fn activate_staged_snapshot<E>(
+    repository_root: impl AsRef<Path>,
+    staging: impl AsRef<Path>,
+    validate: impl FnOnce(&Path) -> Result<(), E>,
+) -> Result<(), Error>
+where
+    E: std::fmt::Display,
+{
+    activate_staged_snapshot_internal(
+        repository_root.as_ref(),
+        staging.as_ref(),
+        |path| validate(path).map_err(|error| error.to_string()),
+        || Ok(()),
+    )
+}
+
+pub fn activate_staged_snapshot_with_finalize<ValidationError, FinalizationError>(
+    repository_root: impl AsRef<Path>,
+    staging: impl AsRef<Path>,
+    validate: impl FnOnce(&Path) -> Result<(), ValidationError>,
+    finalize: impl FnOnce() -> Result<(), FinalizationError>,
+) -> Result<(), Error>
+where
+    ValidationError: std::fmt::Display,
+    FinalizationError: std::fmt::Display,
+{
+    activate_staged_snapshot_internal(
+        repository_root.as_ref(),
+        staging.as_ref(),
+        |path| validate(path).map_err(|error| error.to_string()),
+        || finalize().map_err(|error| error.to_string()),
+    )
+}
+
+fn activate_staged_snapshot_internal(
+    repository_root: &Path,
+    staging: &Path,
+    validate: impl FnOnce(&Path) -> Result<(), String>,
+    finalize: impl FnOnce() -> Result<(), String>,
+) -> Result<(), Error> {
+    let canonical_staging = fs::canonicalize(staging).map_err(|source| Error::Io {
+        path: staging.to_owned(),
+        source,
+    })?;
+    let staging_root = repository_root.join(".plainfeed/staging");
+    let canonical_staging_root = fs::canonicalize(&staging_root).map_err(|source| Error::Io {
+        path: staging_root,
+        source,
+    })?;
+    if canonical_staging.parent() != Some(canonical_staging_root.as_path()) {
+        return Err(Error::InvalidStaging {
+            path: staging.to_owned(),
+        });
+    }
+    for area in ["content", "config"] {
+        if !canonical_staging.join(area).is_dir() {
+            return Err(Error::InvalidStaging {
+                path: canonical_staging.join(area),
+            });
+        }
+    }
+    validate(&canonical_staging).map_err(|error| Error::Validation(error.to_string()))?;
+
+    let _lock = UpdateLock::acquire(repository_root)?;
+    let sequence = MARKER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let backup = repository_root
+        .join(".plainfeed/backup")
+        .join(format!("activation-{sequence:016x}"));
+    fs::create_dir_all(&backup).map_err(|source| Error::Io {
+        path: backup.clone(),
+        source,
+    })?;
+
+    let mut activated = Vec::new();
+    for area in ["content", "config"] {
+        let live = repository_root.join(area);
+        let staged = canonical_staging.join(area);
+        let previous = backup.join(area);
+        let had_previous = live.exists();
+        if had_previous {
+            fs::rename(&live, &previous).map_err(|source| Error::Io {
+                path: live.clone(),
+                source,
+            })?;
+        }
+        if let Err(source) = fs::rename(&staged, &live) {
+            if had_previous {
+                let _ = fs::rename(&previous, &live);
+            }
+            rollback_activation(repository_root, &canonical_staging, &backup, &activated);
+            return Err(Error::Io { path: live, source });
+        }
+        activated.push((area, had_previous));
+    }
+
+    if let Err(error) = finalize() {
+        rollback_activation(repository_root, &canonical_staging, &backup, &activated);
+        return Err(Error::Finalization(error));
+    }
+
+    // The live files, index, and canonical ref are now consistent. Cleanup is
+    // recoverable housekeeping and must not turn a committed activation into a
+    // reported failure that can no longer be rolled back.
+    let _ = fs::remove_dir_all(&backup);
+    let _ = fs::remove_dir(&canonical_staging);
+    Ok(())
+}
+
+fn rollback_activation(
+    repository_root: &Path,
+    staging: &Path,
+    backup: &Path,
+    activated: &[(&str, bool)],
+) {
+    for (area, had_previous) in activated.iter().rev() {
+        let live = repository_root.join(area);
+        let staged = staging.join(area);
+        let previous = backup.join(area);
+        let _ = fs::rename(&live, &staged);
+        if *had_previous {
+            let _ = fs::rename(&previous, &live);
+        }
+    }
+    let _ = fs::remove_dir_all(backup);
 }
 
 #[derive(Clone, Debug)]
@@ -264,6 +442,25 @@ impl SyncState {
     pub fn write_to(&self, repository_root: impl AsRef<Path>) -> Result<(), Error> {
         write_metadata(repository_root.as_ref(), "sync.toml", self)
     }
+
+    pub fn read_from(repository_root: impl AsRef<Path>) -> Result<Option<Self>, Error> {
+        let path = repository_root.as_ref().join(".plainfeed/sync.toml");
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(Error::Io { path, source }),
+        };
+        let state: Self = toml::from_str(&text).map_err(|source| Error::ParseToml {
+            path,
+            source,
+        })?;
+        if state.format != SYNC_FORMAT {
+            return Err(Error::UnsupportedMetadataFormat {
+                format: state.format,
+            });
+        }
+        Ok(Some(state))
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -343,6 +540,7 @@ mod tests {
 
     use super::{
         AuditError, CONFLICT_FORMAT, ConflictReport, DirtyJournal, PathOwner, SyncState,
+        UpdateLock, activate_staged_snapshot, activate_staged_snapshot_with_finalize,
         audit_plainfeed_changes, audit_remote_changes, path_owner,
     };
 
@@ -447,6 +645,10 @@ mod tests {
         let mut state = SyncState::new("origin", "refs/heads/main");
         state.last_remote_oid = Some("aaa".to_owned());
         state.write_to(temporary.path()).unwrap();
+        assert_eq!(
+            SyncState::read_from(temporary.path()).unwrap(),
+            Some(state.clone())
+        );
 
         let report = ConflictReport::new("diverged history", "2026-07-17T00:00:00Z");
         report.write_to(temporary.path()).unwrap();
@@ -465,6 +667,111 @@ mod tests {
                     .file_name()
                     .to_string_lossy()
                     .ends_with(".tmp"))
+        );
+    }
+
+    #[test]
+    fn update_lock_has_single_writer_ownership() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first = UpdateLock::acquire(temporary.path()).unwrap();
+        assert!(UpdateLock::acquire(temporary.path()).is_err());
+        drop(first);
+        UpdateLock::acquire(temporary.path()).unwrap();
+    }
+
+    #[test]
+    fn staged_activation_replaces_remote_owned_paths_and_preserves_state() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::create_dir_all(root.join("content/old")).unwrap();
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::create_dir_all(root.join("state/entries")).unwrap();
+        fs::write(root.join("content/old/deleted.md"), "old").unwrap();
+        fs::write(root.join("config/channels.toml"), "old config").unwrap();
+        fs::write(root.join("state/entries/keep.toml"), "reader state").unwrap();
+
+        let staging = root.join(".plainfeed/staging/remote-a");
+        fs::create_dir_all(staging.join("content/new")).unwrap();
+        fs::create_dir_all(staging.join("config")).unwrap();
+        fs::write(staging.join("content/new/entry.md"), "new").unwrap();
+        fs::write(staging.join("config/channels.toml"), "new config").unwrap();
+
+        activate_staged_snapshot(root, &staging, |_| Ok::<_, &str>(())).unwrap();
+
+        assert!(!root.join("content/old/deleted.md").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("content/new/entry.md")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("config/channels.toml")).unwrap(),
+            "new config"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("state/entries/keep.toml")).unwrap(),
+            "reader state"
+        );
+        assert!(!root.join(".plainfeed/update.lock").exists());
+    }
+
+    #[test]
+    fn invalid_staged_snapshot_leaves_live_paths_untouched() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::create_dir_all(root.join("content")).unwrap();
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join("content/entry.md"), "live content").unwrap();
+        fs::write(root.join("config/channels.toml"), "live config").unwrap();
+        let staging = root.join(".plainfeed/staging/invalid");
+        fs::create_dir_all(staging.join("content")).unwrap();
+        fs::create_dir_all(staging.join("config")).unwrap();
+        fs::write(staging.join("content/entry.md"), "invalid content").unwrap();
+
+        assert!(activate_staged_snapshot(root, &staging, |_| Err("invalid entry")).is_err());
+
+        assert_eq!(
+            fs::read_to_string(root.join("content/entry.md")).unwrap(),
+            "live content"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("config/channels.toml")).unwrap(),
+            "live config"
+        );
+    }
+
+    #[test]
+    fn failed_git_finalization_rolls_back_the_live_snapshot() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::create_dir_all(root.join("content")).unwrap();
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join("content/entry.md"), "old content").unwrap();
+        fs::write(root.join("config/channels.toml"), "old config").unwrap();
+        let staging = root.join(".plainfeed/staging/remote-b");
+        fs::create_dir_all(staging.join("content")).unwrap();
+        fs::create_dir_all(staging.join("config")).unwrap();
+        fs::write(staging.join("content/entry.md"), "new content").unwrap();
+        fs::write(staging.join("config/channels.toml"), "new config").unwrap();
+
+        let result = activate_staged_snapshot_with_finalize(
+            root,
+            &staging,
+            |_| Ok::<_, &str>(()),
+            || Err::<(), _>("index write failed"),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(root.join("content/entry.md")).unwrap(),
+            "old content"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("config/channels.toml")).unwrap(),
+            "old config"
+        );
+        assert_eq!(
+            fs::read_to_string(staging.join("content/entry.md")).unwrap(),
+            "new content"
         );
     }
 }

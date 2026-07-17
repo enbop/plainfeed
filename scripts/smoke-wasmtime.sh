@@ -84,6 +84,12 @@ if grep -q "panicked at" "$LOG"; then
   exit 1
 fi
 
+mkdir -p "$DATA/.plainfeed/update.lock"
+LOCKED_STATUS=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  "http://127.0.0.1:$PORT/")
+test "$LOCKED_STATUS" = "503"
+rmdir "$DATA/.plainfeed/update.lock"
+
 curl --fail --silent --request POST \
   "http://127.0.0.1:$PORT/entries/20260717-wasip2-reader/read" >/dev/null
 curl --fail --silent --request POST --data "favorite=true" \

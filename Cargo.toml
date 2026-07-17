@@ -3,6 +3,7 @@ members = [
     "crates/plainfeed-core",
     "crates/plainfeed-git",
     "crates/plainfeed-server",
+    "crates/plainfeed-sync",
     "crates/plainfeed-sync-core",
 ]
 exclude = ["refs/gitoxide", "refs/memmap2", "refs/reqwest"]
@@ -17,6 +18,7 @@ repository = "https://github.com/spore-bot/plainfeed"
 [workspace.dependencies]
 plainfeed-core = { path = "crates/plainfeed-core" }
 plainfeed-git = { path = "crates/plainfeed-git" }
+plainfeed-sync = { path = "crates/plainfeed-sync" }
 plainfeed-sync-core = { path = "crates/plainfeed-sync-core" }
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.17"
