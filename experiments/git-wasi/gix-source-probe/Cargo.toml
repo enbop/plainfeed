@@ -1,0 +1,34 @@
+[package]
+name = "plainfeed-gix-source-wasi-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["local"]
+local = ["gix/status", "gix/sha1", "gix/tree-editor"]
+async-network = ["gix/async-network-client"]
+https-async-reqwest-rustls = [
+    "async-network",
+    "dep:hickory-resolver",
+    "dep:once_cell",
+    "dep:reqwest",
+    "dep:rustls-rustcrypto",
+    "dep:tokio",
+]
+smart-http-push = [
+    "https-async-reqwest-rustls",
+    "dep:gix-pack",
+]
+
+[dependencies]
+gix = { path = "../../../refs/gitoxide/gix", default-features = false }
+gix-pack = { path = "../../../refs/gitoxide/gix-pack", default-features = false, features = ["generate", "sha1"], optional = true }
+hickory-resolver = { version = "0.26.1", default-features = false, features = ["tokio"], optional = true }
+once_cell = { version = "1.21.3", optional = true }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"], optional = true }
+rustls-rustcrypto = { version = "0.0.2-alpha", optional = true }
+tokio = { version = "1.52.3", features = ["net", "rt", "time"], optional = true }
+
+[patch.crates-io]
+memmap2 = { path = "../../../refs/memmap2" }

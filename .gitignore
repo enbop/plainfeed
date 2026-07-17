@@ -1,0 +1,6 @@
+/target/
+**/target/
+/refs/
+__pycache__/
+*.pyc
+/.local-plan.md

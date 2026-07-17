@@ -1,0 +1,113 @@
+diff --git a/gix-pack/Cargo.toml b/gix-pack/Cargo.toml
+index 64adaf9..fb096c0 100644
+--- a/gix-pack/Cargo.toml
++++ b/gix-pack/Cargo.toml
+@@ -70,7 +70,7 @@ serde = { version = "1.0.114", optional = true, default-features = false, featur
+ document-features = { version = "0.2.0", optional = true }
+ 
+ 
+-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
++[target.'cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))'.dependencies]
+ gix-tempfile = { version = "^23.0.0", default-features = false, path = "../gix-tempfile", optional = true }
+ 
+ [dev-dependencies]
+diff --git a/gix-tempfile/src/forksafe.rs b/gix-tempfile/src/forksafe.rs
+index dd60449..731df77 100644
+--- a/gix-tempfile/src/forksafe.rs
++++ b/gix-tempfile/src/forksafe.rs
+@@ -24,7 +24,7 @@ impl ForksafeTempfile {
+                 Writable => TempfileOrTemppath::Tempfile(tempfile),
+             },
+             cleanup,
+-            owning_process_id: std::process::id(),
++            owning_process_id: crate::process_id(),
+         }
+     }
+ }
+diff --git a/gix-tempfile/src/lib.rs b/gix-tempfile/src/lib.rs
+index 4c3de33..a2bc899 100644
+--- a/gix-tempfile/src/lib.rs
++++ b/gix-tempfile/src/lib.rs
+@@ -127,6 +127,16 @@ use forksafe::ForksafeTempfile;
+ pub mod handle;
+ use crate::handle::{Closed, Writable};
+ 
++#[cfg(target_os = "wasi")]
++fn process_id() -> u32 {
++    0
++}
++
++#[cfg(not(target_os = "wasi"))]
++fn process_id() -> u32 {
++    std::process::id()
++}
++
+ ///
+ pub mod registry;
+ 
+diff --git a/gix-tempfile/src/registry.rs b/gix-tempfile/src/registry.rs
+index a044792..5dc9ea5 100644
+--- a/gix-tempfile/src/registry.rs
++++ b/gix-tempfile/src/registry.rs
+@@ -10,7 +10,7 @@ use crate::REGISTRY;
+ /// at the expense of possibly missing a lock file if another thread wants to obtain it or put it back
+ /// (i.e. mutates the registry shard).
+ pub fn cleanup_tempfiles_signal_safe() {
+-    let current_pid = std::process::id();
++    let current_pid = crate::process_id();
+     #[cfg(feature = "hp-hashmap")]
+     {
+         use std::sync::atomic::Ordering;
+@@ -49,7 +49,7 @@ pub fn cleanup_tempfiles_signal_safe() {
+ ///
+ /// Must not be called from within signal hooks. For that, use [`cleanup_tempfiles_signal_safe()`].
+ pub fn cleanup_tempfiles() {
+-    let current_pid = std::process::id();
++    let current_pid = crate::process_id();
+     #[cfg(feature = "hp-hashmap")]
+     REGISTRY.iter_mut().for_each(|mut tf| {
+         if tf.as_ref().is_some_and(|tf| tf.owning_process_id == current_pid) {
+diff --git a/gix-pack/src/bundle/write/mod.rs b/gix-pack/src/bundle/write/mod.rs
+index b4045ce..2799ff1 100644
+--- a/gix-pack/src/bundle/write/mod.rs
++++ b/gix-pack/src/bundle/write/mod.rs
+@@ -367,11 +367,13 @@ impl crate::Bundle {
+     }
+ }
+ 
++#[cfg(not(target_os = "wasi"))]
+ fn resolve_entry(range: data::EntryRange, mapped_file: &memmap2::Mmap) -> Option<&[u8]> {
+     mapped_file.get(range.start as usize..range.end as usize)
+ }
+ 
+ #[allow(clippy::type_complexity)] // cannot typedef impl Fn
++#[cfg(not(target_os = "wasi"))]
+ fn new_pack_file_resolver(
+     data_file: SharedTempFile,
+ ) -> io::Result<(
+@@ -384,6 +386,25 @@ fn new_pack_file_resolver(
+     Ok((resolve_entry, mapped_file))
+ }
+ 
++#[cfg(target_os = "wasi")]
++fn resolve_entry_from_bytes(range: data::EntryRange, pack: &Vec<u8>) -> Option<&[u8]> {
++    pack.get(range.start as usize..range.end as usize)
++}
++
++#[allow(clippy::type_complexity)] // cannot typedef impl Fn
++#[cfg(target_os = "wasi")]
++fn new_pack_file_resolver(
++    data_file: SharedTempFile,
++) -> io::Result<(
++    impl Fn(data::EntryRange, &Vec<u8>) -> Option<&[u8]> + Send + Clone,
++    Vec<u8>,
++)> {
++    let mut guard = data_file.lock();
++    guard.flush()?;
++    let pack = std::fs::read(guard.get_mut().with_mut(|file| file.path().to_owned())?)?;
++    Ok((resolve_entry_from_bytes, pack))
++}
++
+ struct WriteOutcome {
+     outcome: crate::index::write::Outcome,
+     data_path: Option<PathBuf>,
