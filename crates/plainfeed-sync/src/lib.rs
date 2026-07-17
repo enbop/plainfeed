@@ -1,10 +1,10 @@
 //! Orchestration for staged Plainfeed synchronization.
 
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use plainfeed_core::Store;
 use plainfeed_sync_core::{
-    ConflictReport, activate_staged_snapshot_with_finalize, audit_remote_changes,
+    ConflictReport, SyncState, activate_staged_snapshot_with_finalize, audit_remote_changes,
 };
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -36,6 +36,83 @@ pub enum Error {
     Activation(#[from] plainfeed_sync_core::Error),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SyncCommand {
+    Tick,
+    Force,
+    Status,
+}
+
+pub fn pull_is_due(command: SyncCommand, last_pull_at: Option<&str>, now: OffsetDateTime) -> bool {
+    match command {
+        SyncCommand::Force => true,
+        SyncCommand::Status => false,
+        SyncCommand::Tick => {
+            let Some(last_pull_at) = last_pull_at else {
+                return true;
+            };
+            let Ok(last_pull_at) = OffsetDateTime::parse(last_pull_at, &Rfc3339) else {
+                return true;
+            };
+            now - last_pull_at >= time::Duration::minutes(5)
+        }
+    }
+}
+
+pub async fn run_pull_cycle(
+    command: SyncCommand,
+    repository_root: impl Into<PathBuf>,
+    remote: plainfeed_git::Remote,
+    now: OffsetDateTime,
+) -> Result<bool, Error> {
+    let repository_root = repository_root.into();
+    let mut state = SyncState::read_from(&repository_root)?
+        .unwrap_or_else(|| SyncState::new("origin", "refs/heads/main"));
+    if !pull_is_due(command, state.last_pull_at.as_deref(), now) {
+        return Ok(false);
+    }
+
+    let local_tip = plainfeed_git::reference_oid(&repository_root, "refs/heads/main")?;
+    let trusted_state_tree = match state.last_state_tree_oid.clone() {
+        Some(tree) => tree,
+        None => plainfeed_git::commit_root_entry_oid(&repository_root, &local_tip, "state")?
+            .ok_or(Error::MissingStateTree)?,
+    };
+    let successful_remote_url = remote.url().to_owned();
+    let fetched =
+        match plainfeed_git::fetch(plainfeed_git::FetchRequest::main(&repository_root, remote))
+            .await
+        {
+            Ok(fetched) => fetched,
+            Err(error) => {
+                state.last_error = Some(error.to_string());
+                let _ = state.write_to(&repository_root);
+                return Err(error.into());
+            }
+        };
+    if fetched.remote_tip != local_tip {
+        activate_fetched_snapshot(ActivationRequest {
+            repository_root: repository_root.clone(),
+            branch: "main".to_owned(),
+            expected_base: local_tip,
+            remote_tip: fetched.remote_tip.clone(),
+            trusted_state_tree,
+        })?;
+        state = SyncState::read_from(&repository_root)?.unwrap_or(state);
+    }
+
+    state.remote_url = Some(successful_remote_url);
+    state.last_remote_oid = Some(fetched.remote_tip);
+    state.last_state_tree_oid = fetched.state_tree;
+    state.last_pull_at = Some(
+        now.format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned()),
+    );
+    state.last_error = None;
+    state.write_to(&repository_root)?;
+    Ok(true)
+}
+
 pub fn activate_fetched_snapshot(request: ActivationRequest) -> Result<ActivationOutcome, Error> {
     let changed_paths = plainfeed_git::changed_paths(
         &request.repository_root,
@@ -59,26 +136,42 @@ pub fn activate_fetched_snapshot(request: ActivationRequest) -> Result<Activatio
         .join(".plainfeed/staging")
         .join(&request.remote_tip);
     plainfeed_git::export_remote_snapshot(&request.repository_root, &request.remote_tip, &staging)?;
+    let timestamp = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+    let previous_sync_state = SyncState::read_from(&request.repository_root)?;
+    let mut next_sync_state = previous_sync_state
+        .clone()
+        .unwrap_or_else(|| SyncState::new("origin", format!("refs/heads/{}", request.branch)));
+    next_sync_state.last_remote_oid = Some(request.remote_tip.clone());
+    next_sync_state.last_state_tree_oid = Some(remote_state_tree);
+    next_sync_state.last_pull_at = Some(timestamp.clone());
+    next_sync_state.last_error = None;
     let result = activate_staged_snapshot_with_finalize(
         &request.repository_root,
         &staging,
         |snapshot| Store::open(snapshot).validate(),
         || {
-            plainfeed_git::finalize_fast_forward_checkout(
+            next_sync_state
+                .write_to(&request.repository_root)
+                .map_err(|error| error.to_string())?;
+            if let Err(error) = plainfeed_git::finalize_fast_forward_checkout(
                 &request.repository_root,
                 &request.branch,
                 Some(&request.expected_base),
                 &request.remote_tip,
-            )
+            ) {
+                restore_sync_state(&request.repository_root, previous_sync_state.as_ref())
+                    .map_err(|restore| {
+                        format!("{error}; also failed to restore sync state: {restore}")
+                    })?;
+                return Err(error.to_string());
+            }
+            Ok(())
         },
     );
     if let Err(error) = result {
-        let mut report = ConflictReport::new(
-            error.to_string(),
-            OffsetDateTime::now_utc()
-                .format(&Rfc3339)
-                .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned()),
-        );
+        let mut report = ConflictReport::new(error.to_string(), timestamp);
         report.paths = changed_paths.clone();
         report.local_base = Some(request.expected_base.clone());
         report.remote_tip = Some(request.remote_tip.clone());
@@ -92,13 +185,30 @@ pub fn activate_fetched_snapshot(request: ActivationRequest) -> Result<Activatio
     })
 }
 
+fn restore_sync_state(
+    repository_root: &std::path::Path,
+    previous: Option<&SyncState>,
+) -> Result<(), plainfeed_sync_core::Error> {
+    match previous {
+        Some(previous) => previous.write_to(repository_root),
+        None => {
+            let path = repository_root.join(".plainfeed/sync.toml");
+            match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(source) => Err(plainfeed_sync_core::Error::Io { path, source }),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
     use gix::{bstr::ByteSlice, objs::tree::EntryKind};
 
-    use super::{ActivationRequest, activate_fetched_snapshot};
+    use super::{ActivationRequest, SyncCommand, activate_fetched_snapshot, pull_is_due};
 
     const OLD_ENTRY: &str = r#"+++
 format = "plainfeed.entry/v1"
@@ -137,6 +247,32 @@ label = "Technology"
 entry_id = "old-entry"
 favorite = true
 "#;
+
+    #[test]
+    fn pull_schedule_distinguishes_tick_force_and_status() {
+        let now = time::OffsetDateTime::parse(
+            "2026-07-17T01:10:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert!(pull_is_due(
+            SyncCommand::Force,
+            Some("2026-07-17T01:09:59Z"),
+            now
+        ));
+        assert!(!pull_is_due(SyncCommand::Status, None, now));
+        assert!(pull_is_due(SyncCommand::Tick, None, now));
+        assert!(!pull_is_due(
+            SyncCommand::Tick,
+            Some("2026-07-17T01:05:01Z"),
+            now
+        ));
+        assert!(pull_is_due(
+            SyncCommand::Tick,
+            Some("2026-07-17T01:05:00Z"),
+            now
+        ));
+    }
 
     #[test]
     fn activates_a_valid_fetched_snapshot_without_touching_reader_state() {
@@ -215,7 +351,7 @@ favorite = true
             branch: "main".to_owned(),
             expected_base: old_commit.to_string(),
             remote_tip: new_commit.to_string(),
-            trusted_state_tree,
+            trusted_state_tree: trusted_state_tree.clone(),
         })
         .unwrap();
 
@@ -237,6 +373,18 @@ favorite = true
                 .to_string(),
             new_commit.to_string()
         );
+        let sync_state = plainfeed_sync_core::SyncState::read_from(&root)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sync_state.last_remote_oid.as_deref(),
+            Some(new_commit.to_string().as_str())
+        );
+        assert_eq!(
+            sync_state.last_state_tree_oid.as_deref(),
+            Some(trusted_state_tree.as_str())
+        );
+        assert!(sync_state.last_pull_at.is_some());
     }
 
     #[test]

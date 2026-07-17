@@ -12,7 +12,7 @@ mod http;
 
 pub use fetch::{
     FetchOutcome, FetchRequest, changed_paths, commit_root_entry_oid, export_remote_snapshot,
-    fetch, finalize_fast_forward_checkout,
+    fetch, finalize_fast_forward_checkout, reference_oid,
 };
 
 #[derive(Clone)]

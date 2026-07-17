@@ -2216,9 +2216,11 @@ dependencies = [
  "plainfeed-core",
  "plainfeed-git",
  "plainfeed-sync-core",
+ "rustls-rustcrypto",
  "tempfile",
  "thiserror",
  "time",
+ "tokio",
 ]
 
 [[package]]

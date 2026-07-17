@@ -235,6 +235,19 @@ pub fn commit_root_entry_oid(
         .map(|entry| entry.object_id().to_string()))
 }
 
+pub fn reference_oid(
+    repository_path: impl AsRef<Path>,
+    reference_name: &str,
+) -> Result<String, Error> {
+    let repository = gix::open(repository_path.as_ref()).map_err(git_error)?;
+    Ok(repository
+        .find_reference(reference_name)
+        .map_err(git_error)?
+        .into_fully_peeled_id()
+        .map_err(git_error)?
+        .to_string())
+}
+
 fn export_tree(tree: &gix::Tree<'_>, destination: &Path) -> Result<(), Error> {
     for entry in tree.iter() {
         let entry = entry.map_err(git_error)?;
@@ -282,7 +295,10 @@ pub fn finalize_fast_forward_checkout(
     remote_tip: &str,
 ) -> Result<(), Error> {
     validate_branch(branch)?;
-    let repository = gix::open(repository_path.as_ref()).map_err(git_error)?;
+    let mut repository = gix::open(repository_path.as_ref()).map_err(git_error)?;
+    repository
+        .committer_or_set_generic_fallback()
+        .map_err(git_error)?;
     let remote_oid = gix::hash::ObjectId::from_hex(remote_tip.as_bytes()).map_err(git_error)?;
     let remote_commit = repository.find_commit(remote_oid).map_err(git_error)?;
     let expected_oid = expected_previous

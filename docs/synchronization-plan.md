@@ -36,7 +36,11 @@ External writers must follow the [producer contract](producer-contract.md).
   index and `main` advance with compare-and-swap finalization; validation or
   finalization failures restore the previous snapshot and write a conflict
   report. The Wasmtime reader returns a retryable 503 while the lock is held.
-- Phase 4 is the next implementation step.
+- Phase 4: `plainfeed-sync.wasm` implements `force`, `tick`, and `status`.
+  Real Wasmtime tests cover forced and no-change pulls, five-minute tick
+  throttling, offline failure without worktree changes, persisted errors, and
+  recovery. Deployment commands are documented in [deployment.md](deployment.md).
+- Phase 5 is the next implementation step.
 
 ## Runtime topology
 
@@ -93,6 +97,7 @@ Store human-readable, uncommitted status in `.plainfeed/sync.toml`:
 ```toml
 format = "plainfeed.sync/v1"
 remote = "origin"
+remote_url = "https://github.com/spore-bot/plainfeed-playground.git"
 branch = "refs/heads/main"
 last_remote_oid = "..."
 last_state_tree_oid = "..."

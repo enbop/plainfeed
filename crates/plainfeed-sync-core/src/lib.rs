@@ -417,6 +417,7 @@ struct DirtyMarker<'a> {
 pub struct SyncState {
     pub format: String,
     pub remote: String,
+    pub remote_url: Option<String>,
     pub branch: String,
     pub last_remote_oid: Option<String>,
     pub last_state_tree_oid: Option<String>,
@@ -430,6 +431,7 @@ impl SyncState {
         Self {
             format: SYNC_FORMAT.to_owned(),
             remote: remote.into(),
+            remote_url: None,
             branch: branch.into(),
             last_remote_oid: None,
             last_state_tree_oid: None,
@@ -450,10 +452,8 @@ impl SyncState {
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(Error::Io { path, source }),
         };
-        let state: Self = toml::from_str(&text).map_err(|source| Error::ParseToml {
-            path,
-            source,
-        })?;
+        let state: Self =
+            toml::from_str(&text).map_err(|source| Error::ParseToml { path, source })?;
         if state.format != SYNC_FORMAT {
             return Err(Error::UnsupportedMetadataFormat {
                 format: state.format,
@@ -668,6 +668,17 @@ mod tests {
                     .to_string_lossy()
                     .ends_with(".tmp"))
         );
+    }
+
+    #[test]
+    fn sync_state_round_trips_and_missing_state_is_none() {
+        let temporary = tempfile::tempdir().unwrap();
+        assert!(SyncState::read_from(temporary.path()).unwrap().is_none());
+        let mut state = SyncState::new("origin", "refs/heads/main");
+        state.last_remote_oid = Some("abc".to_owned());
+        state.write_to(temporary.path()).unwrap();
+
+        assert_eq!(SyncState::read_from(temporary.path()).unwrap(), Some(state));
     }
 
     #[test]
