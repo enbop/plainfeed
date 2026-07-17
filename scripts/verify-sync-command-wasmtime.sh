@@ -92,6 +92,36 @@ if grep -q '^last_error = ' "$REPOSITORY/.plainfeed/sync.toml"; then
   echo "successful recovery did not clear last_error" >&2
   exit 1
 fi
+
+SOURCE_ENTRY=$(find "$REPOSITORY/content" -type f -name '*.md' | head -n 1)
+cp "$SOURCE_ENTRY" "$REPOSITORY/content/plainfeed-local-conflict.md"
+if run_network_command force >"$LOG" 2>&1; then
+  echo "forced sync unexpectedly overwrote a local content change" >&2
+  exit 1
+fi
+test -f "$REPOSITORY/.plainfeed/conflict.toml"
+CONFLICT_STATUS=$(wasmtime run \
+  --dir "$REPOSITORY::/data" \
+  "$WASM" status)
+case "$CONFLICT_STATUS" in
+  *"conflict_active=true"*"content/plainfeed-local-conflict.md"*) ;;
+  *) echo "status did not expose the local ownership conflict" >&2; exit 1 ;;
+esac
+rm "$REPOSITORY/content/plainfeed-local-conflict.md"
+if run_network_command force >"$LOG" 2>&1; then
+  echo "forced sync unexpectedly bypassed an unacknowledged conflict" >&2
+  exit 1
+fi
+wasmtime run \
+  --dir "$REPOSITORY::/data" \
+  "$WASM" acknowledge-conflict >/dev/null
+RECOVERED=$(run_network_command force)
+case "$RECOVERED" in
+  *"pull=completed"*) ;;
+  *) echo "sync did not recover after removing the local conflict" >&2; exit 1 ;;
+esac
+test ! -f "$REPOSITORY/.plainfeed/conflict.toml"
+
 git -C "$REPOSITORY" fsck --full >/dev/null
 
-echo "Plainfeed force, tick, status, offline, and recovery commands passed under Wasmtime"
+echo "Plainfeed scheduling, offline recovery, and conflict status passed under Wasmtime"

@@ -39,6 +39,10 @@ pub enum Error {
     PushRetryExhausted,
     #[error("reader state is invalid: {0}")]
     InvalidState(#[from] plainfeed_core::Error),
+    #[error("local changes are outside Plainfeed-owned state paths: {paths:?}")]
+    LocalOwnership { paths: Vec<String> },
+    #[error("synchronization is blocked by an active conflict: {reason}")]
+    ConflictActive { reason: String },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,6 +108,7 @@ pub async fn run_pull_cycle(
     now: OffsetDateTime,
 ) -> Result<bool, Error> {
     let repository_root = repository_root.into();
+    ensure_no_active_conflict(&repository_root)?;
     let mut state = SyncState::read_from(&repository_root)?
         .unwrap_or_else(|| SyncState::new("origin", "refs/heads/main"));
     if !pull_is_due(command, state.last_pull_at.as_deref(), now) {
@@ -111,6 +116,7 @@ pub async fn run_pull_cycle(
     }
 
     let local_tip = plainfeed_git::reference_oid(&repository_root, "refs/heads/main")?;
+    preflight_local_ownership(&repository_root, &local_tip, now)?;
     let trusted_state_tree = match state.last_state_tree_oid.clone() {
         Some(tree) => tree,
         None => plainfeed_git::commit_root_entry_oid(&repository_root, &local_tip, "state")?
@@ -128,6 +134,7 @@ pub async fn run_pull_cycle(
                 return Err(error.into());
             }
         };
+    preflight_remote_history(&repository_root, &local_tip, &fetched.remote_tip, now)?;
     if fetched.remote_tip != local_tip {
         activate_fetched_snapshot(ActivationRequest {
             repository_root: repository_root.clone(),
@@ -157,21 +164,34 @@ pub async fn publish_state(
     now: OffsetDateTime,
 ) -> Result<PublishOutcome, Error> {
     let repository_root = repository_root.into();
+    ensure_no_active_conflict(&repository_root)?;
     let journal = DirtyJournal::new(&repository_root);
     let dirty_snapshot = journal.snapshot()?;
     if dirty_snapshot.is_empty() {
         return Ok(PublishOutcome::NoDirtyState);
     }
-    Store::open(&repository_root).validate_state()?;
+    if let Err(error) = Store::open(&repository_root).validate_state() {
+        write_conflict_report(
+            &repository_root,
+            error.to_string(),
+            vec!["state".to_owned()],
+            None,
+            None,
+            now,
+        )?;
+        return Err(Error::InvalidState(error));
+    }
     let remote_url = remote.url().to_owned();
     let mut state = SyncState::read_from(&repository_root)?
         .unwrap_or_else(|| SyncState::new("origin", "refs/heads/main"));
     let timestamp = now
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+    let mut last_stale_remote = None;
 
     for attempt in 0..3 {
         let local_tip = plainfeed_git::reference_oid(&repository_root, "refs/heads/main")?;
+        preflight_local_ownership(&repository_root, &local_tip, now)?;
         let trusted_state_tree = match state.last_state_tree_oid.clone() {
             Some(tree) => tree,
             None => plainfeed_git::commit_root_entry_oid(&repository_root, &local_tip, "state")?
@@ -182,17 +202,28 @@ pub async fn publish_state(
             remote.clone(),
         ))
         .await?;
+        preflight_remote_history(&repository_root, &local_tip, &fetched.remote_tip, now)?;
         let base = state
             .last_remote_oid
             .as_deref()
             .unwrap_or(local_tip.as_str());
         let remote_paths =
             plainfeed_git::changed_paths(&repository_root, Some(base), &fetched.remote_tip)?;
-        audit_remote_changes(
+        if let Err(error) = audit_remote_changes(
             remote_paths.iter().map(String::as_str),
             fetched.state_tree.as_deref(),
             Some(&trusted_state_tree),
-        )?;
+        ) {
+            write_conflict_report(
+                &repository_root,
+                error.to_string(),
+                remote_paths,
+                Some(local_tip.clone()),
+                Some(fetched.remote_tip.clone()),
+                now,
+            )?;
+            return Err(Error::Audit(error));
+        }
 
         if fetched.remote_tip != local_tip {
             activate_fetched_snapshot(ActivationRequest {
@@ -205,7 +236,10 @@ pub async fn publish_state(
             state = SyncState::read_from(&repository_root)?.unwrap_or(state);
         }
 
-        let candidate_ref = format!("refs/plainfeed/state-candidate-{attempt}");
+        let candidate_ref = format!(
+            "refs/plainfeed/state-candidate-{:032x}-{attempt}",
+            now.unix_timestamp_nanos()
+        );
         let candidate = plainfeed_git::create_state_commit(
             &repository_root,
             &fetched.remote_tip,
@@ -253,11 +287,99 @@ pub async fn publish_state(
                 journal.clear_snapshot(&dirty_snapshot)?;
                 return Ok(PublishOutcome::Pushed(outcome));
             }
-            Err(plainfeed_git::Error::StaleRemote { .. }) => continue,
+            Err(plainfeed_git::Error::StaleRemote { parent, remote }) => {
+                last_stale_remote = Some((parent, remote));
+                continue;
+            }
             Err(error) => return Err(error.into()),
         }
     }
+    let (local_base, remote_tip) = last_stale_remote
+        .map(|(parent, remote)| (Some(parent), Some(remote)))
+        .unwrap_or_else(|| (state.last_remote_oid.clone(), None));
+    write_conflict_report(
+        &repository_root,
+        "state publication lost the remote race three times",
+        Vec::new(),
+        local_base,
+        remote_tip,
+        now,
+    )?;
     Err(Error::PushRetryExhausted)
+}
+
+fn ensure_no_active_conflict(repository_root: &std::path::Path) -> Result<(), Error> {
+    if let Some(report) = ConflictReport::read_from(repository_root)? {
+        return Err(Error::ConflictActive {
+            reason: report.reason,
+        });
+    }
+    Ok(())
+}
+
+fn preflight_remote_history(
+    repository_root: &std::path::Path,
+    local_tip: &str,
+    remote_tip: &str,
+    now: OffsetDateTime,
+) -> Result<(), Error> {
+    if plainfeed_git::is_ancestor(repository_root, local_tip, remote_tip)? {
+        return Ok(());
+    }
+    let paths = plainfeed_git::changed_paths(repository_root, Some(local_tip), remote_tip)
+        .unwrap_or_default();
+    let error = plainfeed_git::Error::NonFastForward {
+        base: local_tip.to_owned(),
+        remote: remote_tip.to_owned(),
+    };
+    write_conflict_report(
+        repository_root,
+        error.to_string(),
+        paths,
+        Some(local_tip.to_owned()),
+        Some(remote_tip.to_owned()),
+        now,
+    )?;
+    Err(Error::Git(error))
+}
+
+fn preflight_local_ownership(
+    repository_root: &std::path::Path,
+    local_tip: &str,
+    now: OffsetDateTime,
+) -> Result<(), Error> {
+    let paths =
+        plainfeed_git::worktree_changed_paths(repository_root, local_tip, &["content", "config"])?;
+    if paths.is_empty() {
+        return Ok(());
+    }
+    write_conflict_report(
+        repository_root,
+        "local content or configuration differs from the canonical Git commit",
+        paths.clone(),
+        Some(local_tip.to_owned()),
+        None,
+        now,
+    )?;
+    Err(Error::LocalOwnership { paths })
+}
+
+fn write_conflict_report(
+    repository_root: &std::path::Path,
+    reason: impl Into<String>,
+    paths: Vec<String>,
+    local_base: Option<String>,
+    remote_tip: Option<String>,
+    now: OffsetDateTime,
+) -> Result<(), plainfeed_sync_core::Error> {
+    let detected_at = now
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+    let mut report = ConflictReport::new(reason, detected_at);
+    report.paths = paths;
+    report.local_base = local_base;
+    report.remote_tip = remote_tip;
+    report.write_to(repository_root)
 }
 
 fn finalize_publication_state(
@@ -287,11 +409,21 @@ pub fn activate_fetched_snapshot(request: ActivationRequest) -> Result<Activatio
         "state",
     )?
     .ok_or(Error::MissingStateTree)?;
-    audit_remote_changes(
+    if let Err(error) = audit_remote_changes(
         changed_paths.iter().map(String::as_str),
         Some(&remote_state_tree),
         Some(&request.trusted_state_tree),
-    )?;
+    ) {
+        write_conflict_report(
+            &request.repository_root,
+            error.to_string(),
+            changed_paths.clone(),
+            Some(request.expected_base.clone()),
+            Some(request.remote_tip.clone()),
+            OffsetDateTime::now_utc(),
+        )?;
+        return Err(Error::Audit(error));
+    }
 
     let staging = request
         .repository_root
@@ -371,8 +503,8 @@ mod tests {
     use gix::{bstr::ByteSlice, objs::tree::EntryKind};
 
     use super::{
-        ActivationRequest, SyncCommand, activate_fetched_snapshot, pull_is_due,
-        state_publication_is_due,
+        ActivationRequest, SyncCommand, activate_fetched_snapshot, ensure_no_active_conflict,
+        preflight_local_ownership, preflight_remote_history, pull_is_due, state_publication_is_due,
     };
 
     const OLD_ENTRY: &str = r#"+++
@@ -469,6 +601,127 @@ favorite = true
             &[marker(300, "old"), marker(599, "new")],
             now
         ));
+    }
+
+    #[test]
+    fn an_active_conflict_requires_explicit_acknowledgement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let report = plainfeed_sync_core::ConflictReport::new(
+            "remote state changed",
+            "2026-07-17T05:00:00Z",
+        );
+        report.write_to(temporary.path()).unwrap();
+
+        assert!(ensure_no_active_conflict(temporary.path()).is_err());
+        plainfeed_sync_core::ConflictReport::clear(temporary.path()).unwrap();
+        ensure_no_active_conflict(temporary.path()).unwrap();
+    }
+
+    #[test]
+    fn divergent_history_pauses_before_activation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = gix::init(temporary.path().join("data")).unwrap();
+        let identity = gix::actor::SignatureRef {
+            name: b"Plainfeed Test".as_bstr(),
+            email: b"test@plainfeed.invalid".as_bstr(),
+            time: "1784160000 +0900",
+        };
+        let tree = repository.empty_tree().id;
+        let base = repository
+            .commit_as(
+                identity,
+                identity,
+                "refs/heads/base",
+                "base",
+                tree,
+                gix::commit::NO_PARENT_IDS,
+            )
+            .unwrap();
+        let local = repository
+            .commit_as(
+                identity,
+                identity,
+                "refs/heads/main",
+                "local",
+                tree,
+                [base.detach()],
+            )
+            .unwrap();
+        let remote = repository
+            .commit_as(
+                identity,
+                identity,
+                "refs/remotes/origin/main",
+                "remote",
+                tree,
+                [base.detach()],
+            )
+            .unwrap();
+
+        assert!(
+            preflight_remote_history(
+                repository.path(),
+                &local.to_string(),
+                &remote.to_string(),
+                time::OffsetDateTime::from_unix_timestamp(1_784_160_000).unwrap(),
+            )
+            .is_err()
+        );
+        let report = plainfeed_sync_core::ConflictReport::read_from(repository.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.local_base, Some(local.to_string()));
+        assert_eq!(report.remote_tip, Some(remote.to_string()));
+    }
+
+    #[test]
+    fn local_content_changes_pause_sync_and_write_a_conflict_report() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("data");
+        let repository = gix::init(&root).unwrap();
+        let content = repository.write_blob(b"committed\n").unwrap();
+        let config = repository.write_blob(CHANNELS.as_bytes()).unwrap();
+        let mut editor = repository.edit_tree(repository.empty_tree().id).unwrap();
+        editor
+            .upsert("content/item.md", EntryKind::Blob, content)
+            .unwrap();
+        editor
+            .upsert("config/channels.toml", EntryKind::Blob, config)
+            .unwrap();
+        let tree = editor.write().unwrap();
+        let identity = gix::actor::SignatureRef {
+            name: b"Plainfeed Test".as_bstr(),
+            email: b"test@plainfeed.invalid".as_bstr(),
+            time: "1784160000 +0900",
+        };
+        let commit = repository
+            .commit_as(
+                identity,
+                identity,
+                "refs/heads/main",
+                "fixture",
+                tree,
+                gix::commit::NO_PARENT_IDS,
+            )
+            .unwrap();
+        fs::create_dir_all(root.join("content")).unwrap();
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join("content/item.md"), b"manual local edit\n").unwrap();
+        fs::write(root.join("config/channels.toml"), CHANNELS).unwrap();
+
+        assert!(
+            preflight_local_ownership(
+                &root,
+                &commit.to_string(),
+                time::OffsetDateTime::from_unix_timestamp(1_784_160_000).unwrap(),
+            )
+            .is_err()
+        );
+        let report = plainfeed_sync_core::ConflictReport::read_from(&root)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.paths, ["content/item.md"]);
+        assert_eq!(report.local_base, Some(commit.to_string()));
     }
 
     #[test]
@@ -670,5 +923,83 @@ favorite = true
                 .to_string(),
             old_commit.to_string()
         );
+    }
+
+    #[test]
+    fn remote_state_change_is_reported_without_activation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("data");
+        let repository = gix::init(&root).unwrap();
+        let identity = gix::actor::SignatureRef {
+            name: b"Plainfeed Test".as_bstr(),
+            email: b"test@plainfeed.invalid".as_bstr(),
+            time: "1784160000 +0900",
+        };
+        let content = repository.write_blob(OLD_ENTRY.as_bytes()).unwrap();
+        let old_state = repository.write_blob(STATE.as_bytes()).unwrap();
+        let mut old_editor = repository.edit_tree(repository.empty_tree().id).unwrap();
+        old_editor
+            .upsert("content/old-entry.md", EntryKind::Blob, content)
+            .unwrap();
+        old_editor
+            .upsert("state/entries/old-entry.toml", EntryKind::Blob, old_state)
+            .unwrap();
+        let old_tree = old_editor.write().unwrap();
+        let old_commit = repository
+            .commit_as(
+                identity,
+                identity,
+                "refs/heads/main",
+                "old",
+                old_tree,
+                gix::commit::NO_PARENT_IDS,
+            )
+            .unwrap();
+        let changed_state = repository
+            .write_blob(
+                STATE
+                    .replace("favorite = true", "favorite = false")
+                    .as_bytes(),
+            )
+            .unwrap();
+        let mut remote_editor = repository.edit_tree(old_tree).unwrap();
+        remote_editor
+            .upsert(
+                "state/entries/old-entry.toml",
+                EntryKind::Blob,
+                changed_state,
+            )
+            .unwrap();
+        let remote_tree = remote_editor.write().unwrap();
+        let remote_commit = repository
+            .commit_as(
+                identity,
+                identity,
+                "refs/remotes/origin/main",
+                "remote state edit",
+                remote_tree,
+                [old_commit.detach()],
+            )
+            .unwrap();
+        let trusted_state_tree =
+            plainfeed_git::commit_root_entry_oid(&root, &old_commit.to_string(), "state")
+                .unwrap()
+                .unwrap();
+
+        let error = activate_fetched_snapshot(ActivationRequest {
+            repository_root: root.clone(),
+            branch: "main".to_owned(),
+            expected_base: old_commit.to_string(),
+            remote_tip: remote_commit.to_string(),
+            trusted_state_tree,
+        })
+        .unwrap_err();
+
+        assert!(matches!(error, super::Error::Audit(_)));
+        let report = plainfeed_sync_core::ConflictReport::read_from(&root)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.paths, ["state/entries/old-entry.toml"]);
+        assert_eq!(report.remote_tip, Some(remote_commit.to_string()));
     }
 }

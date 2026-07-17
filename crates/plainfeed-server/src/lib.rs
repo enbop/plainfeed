@@ -139,13 +139,16 @@ fn find_entry(store: &Store, id: &str) -> Result<Entry, StoreError> {
 
 fn render_feed(data_root: &Path, selected_channel: Option<&str>, fragment: bool) -> Response {
     let store = Store::open(data_root);
+    let conflict = plainfeed_sync_core::ConflictReport::read_from(data_root)
+        .ok()
+        .flatten();
     match (store.entries(), store.channels()) {
         (Ok(entries), Ok(channels)) => {
             let unread = entries
                 .iter()
                 .filter(|entry| entry.state.read_at.is_none())
                 .count();
-            let shell = render_feed_shell(&entries, &channels, selected_channel);
+            let shell = render_feed_shell(&entries, &channels, selected_channel, conflict.as_ref());
             if fragment {
                 return Response::text(200, "text/html; charset=utf-8", shell);
             }
@@ -183,6 +186,7 @@ fn render_feed_shell(
     entries: &[Entry],
     channels: &[Channel],
     selected_channel: Option<&str>,
+    conflict: Option<&plainfeed_sync_core::ConflictReport>,
 ) -> String {
     let mut navigation = channel_link("All", None, selected_channel, entries.len());
     for channel in channels {
@@ -217,11 +221,29 @@ fn render_feed_shell(
         visible.into_iter().map(render_entry).collect::<String>()
     };
 
+    let conflict = conflict.map(render_conflict_banner).unwrap_or_default();
     format!(
         r#"<section id="feed-shell" class="feed-shell">
+  {conflict}
   <nav class="channel-tabs" aria-label="Feed channels">{navigation}</nav>
   <main id="feed" class="feed">{cards}</main>
 </section>"#
+    )
+}
+
+fn render_conflict_banner(report: &plainfeed_sync_core::ConflictReport) -> String {
+    let local_base = report.local_base.as_deref().unwrap_or("unknown");
+    let remote_tip = report.remote_tip.as_deref().unwrap_or("unknown");
+    format!(
+        r#"<aside class="sync-conflict" role="alert">
+  <h2>Synchronization needs attention</h2>
+  <p>{}</p>
+  <dl><div><dt>Local base</dt><dd><code>{}</code></dd></div><div><dt>Remote tip</dt><dd><code>{}</code></dd></div></dl>
+  <p class="sync-conflict-help">The last valid feed remains available. Inspect <code>.plainfeed/conflict.toml</code>, repair the repository, acknowledge the report, and force synchronization.</p>
+</aside>"#,
+        escape_html(&report.reason),
+        escape_html(local_base),
+        escape_html(remote_tip),
     )
 }
 
@@ -550,6 +572,28 @@ wasip2::http::proxy::export!(Handler);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conflict_banner_keeps_the_last_valid_feed_available() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut report = plainfeed_sync_core::ConflictReport::new(
+            "remote <state> changed",
+            "2026-07-17T05:00:00Z",
+        );
+        report.local_base = Some("aaa".to_owned());
+        report.remote_tip = Some("bbb".to_owned());
+        report.write_to(temporary.path()).unwrap();
+
+        let response = route("GET", "/", &[], temporary.path());
+        let body = String::from_utf8(response.body.into_owned()).unwrap();
+        assert_eq!(response.status, 200);
+        assert!(body.contains("Synchronization needs attention"));
+        assert!(body.contains("remote &lt;state&gt; changed"));
+        assert!(!body.contains("remote <state> changed"));
+        assert!(body.contains("aaa"));
+        assert!(body.contains("bbb"));
+        assert!(body.contains("Your feed is empty"));
+    }
 
     #[test]
     fn form_decoding_handles_utf8() {

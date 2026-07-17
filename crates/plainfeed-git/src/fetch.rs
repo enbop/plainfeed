@@ -50,7 +50,10 @@ pub async fn fetch(request: FetchRequest) -> Result<FetchOutcome, Error> {
 
     let source_ref = format!("refs/heads/{}", request.branch);
     let destination_ref = format!("refs/remotes/origin/{}", request.branch);
-    let refspec = format!("{source_ref}:{destination_ref}");
+    // The remote-tracking ref is observational and may follow a force push.
+    // The canonical local branch is protected separately by an ancestry check
+    // before any live files or refs are activated.
+    let refspec = format!("+{source_ref}:{destination_ref}");
     let remote = repository
         .remote_at(request.remote.url())
         .map_err(git_error)?
@@ -108,6 +111,93 @@ pub fn changed_paths(
         .into_iter()
         .filter(|path| previous.get(path) != remote.get(path))
         .collect())
+}
+
+pub fn worktree_changed_paths(
+    repository_path: impl AsRef<Path>,
+    commit_oid: &str,
+    areas: &[&str],
+) -> Result<Vec<String>, Error> {
+    let repository_path = repository_path.as_ref();
+    let repository = gix::open(repository_path).map_err(git_error)?;
+    let tree = find_commit_tree(&repository, commit_oid)?;
+    let mut expected = BTreeMap::new();
+    collect_tree_entries(&tree, "", &mut expected)?;
+    expected.retain(|path, _| area_matches(path, areas));
+
+    let mut actual = BTreeMap::new();
+    for area in areas {
+        collect_worktree_entries(
+            repository_path,
+            &repository_path.join(area),
+            &mut actual,
+            repository.object_hash(),
+        )?;
+    }
+
+    let all_paths: BTreeSet<_> = expected.keys().chain(actual.keys()).cloned().collect();
+    Ok(all_paths
+        .into_iter()
+        .filter(|path| expected.get(path).map(|(_, oid)| oid) != actual.get(path))
+        .collect())
+}
+
+fn area_matches(path: &str, areas: &[&str]) -> bool {
+    areas
+        .iter()
+        .any(|area| path == *area || path.starts_with(&format!("{area}/")))
+}
+
+fn collect_worktree_entries(
+    repository_root: &Path,
+    path: &Path,
+    entries: &mut BTreeMap<String, gix::hash::ObjectId>,
+    hash_kind: gix::hash::Kind,
+) -> Result<(), Error> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(Error::Io {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    let relative = path.strip_prefix(repository_root).map_err(git_error)?;
+    let relative = relative
+        .to_str()
+        .ok_or_else(|| Error::Git(format!("worktree path is not UTF-8: {}", path.display())))?;
+    if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
+        entries.insert(relative.to_owned(), gix::hash::ObjectId::null(hash_kind));
+        return Ok(());
+    }
+    if metadata.is_file() {
+        let data = fs::read(path).map_err(|source| Error::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+        let oid =
+            gix::objs::compute_hash(hash_kind, gix::objs::Kind::Blob, &data).map_err(git_error)?;
+        entries.insert(relative.to_owned(), oid);
+        return Ok(());
+    }
+
+    let mut children = fs::read_dir(path)
+        .map_err(|source| Error::Io {
+            path: path.to_owned(),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| Error::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+    children.sort_by_key(|entry| entry.file_name());
+    for child in children {
+        collect_worktree_entries(repository_root, &child.path(), entries, hash_kind)?;
+    }
+    Ok(())
 }
 
 fn find_commit_tree<'repo>(
@@ -248,6 +338,26 @@ pub fn reference_oid(
         .to_string())
 }
 
+pub fn is_ancestor(
+    repository_path: impl AsRef<Path>,
+    ancestor: &str,
+    descendant: &str,
+) -> Result<bool, Error> {
+    let repository = gix::open(repository_path.as_ref()).map_err(git_error)?;
+    let ancestor = gix::hash::ObjectId::from_hex(ancestor.as_bytes()).map_err(git_error)?;
+    let descendant = gix::hash::ObjectId::from_hex(descendant.as_bytes()).map_err(git_error)?;
+    if ancestor == descendant {
+        return Ok(true);
+    }
+    let descendant = repository.find_commit(descendant).map_err(git_error)?;
+    for commit in descendant.ancestors().all().map_err(git_error)? {
+        if commit.map_err(git_error)?.id == ancestor {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn export_tree(tree: &gix::Tree<'_>, destination: &Path) -> Result<(), Error> {
     for entry in tree.iter() {
         let entry = entry.map_err(git_error)?;
@@ -305,20 +415,17 @@ pub fn finalize_fast_forward_checkout(
         .map(|value| gix::hash::ObjectId::from_hex(value.as_bytes()).map_err(git_error))
         .transpose()?;
 
-    if let Some(expected_oid) = expected_oid {
-        let mut found = false;
-        for commit in remote_commit.ancestors().all().map_err(git_error)? {
-            if commit.map_err(git_error)?.id == expected_oid {
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            return Err(Error::NonFastForward {
-                base: expected_oid.to_string(),
-                remote: remote_oid.to_string(),
-            });
-        }
+    if let Some(expected_oid) = expected_oid
+        && !is_ancestor(
+            repository_path.as_ref(),
+            &expected_oid.to_string(),
+            &remote_oid.to_string(),
+        )?
+    {
+        return Err(Error::NonFastForward {
+            base: expected_oid.to_string(),
+            remote: remote_oid.to_string(),
+        });
     }
 
     let index_path = repository.index_path();
@@ -419,10 +526,13 @@ fn git_error(error: impl std::fmt::Display + std::fmt::Debug) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use gix::{bstr::ByteSlice, objs::tree::EntryKind};
 
     use super::{
-        changed_paths, export_remote_snapshot, finalize_fast_forward_checkout, validate_branch,
+        changed_paths, export_remote_snapshot, finalize_fast_forward_checkout, is_ancestor,
+        validate_branch, worktree_changed_paths,
     };
 
     #[test]
@@ -432,6 +542,102 @@ mod tests {
         for invalid in ["", "../main", "main..old", "bad:main", "topic/", "-main"] {
             assert!(validate_branch(invalid).is_err(), "accepted {invalid:?}");
         }
+    }
+
+    #[test]
+    fn detects_local_changes_only_in_remote_owned_areas() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("repository");
+        let repository = gix::init(&root).unwrap();
+        let content = repository.write_blob(b"committed content\n").unwrap();
+        let config = repository.write_blob(b"committed config\n").unwrap();
+        let state = repository.write_blob(b"committed state\n").unwrap();
+        let mut editor = repository.edit_tree(repository.empty_tree().id).unwrap();
+        editor
+            .upsert("content/item.md", EntryKind::Blob, content)
+            .unwrap();
+        editor
+            .upsert("config/channels.toml", EntryKind::Blob, config)
+            .unwrap();
+        editor
+            .upsert("state/entries/item.toml", EntryKind::Blob, state)
+            .unwrap();
+        let tree = editor.write().unwrap();
+        let identity = gix::actor::SignatureRef {
+            name: b"Plainfeed Test".as_bstr(),
+            email: b"test@plainfeed.invalid".as_bstr(),
+            time: "1784160000 +0900",
+        };
+        let commit = repository
+            .commit_as(
+                identity,
+                identity,
+                "refs/heads/main",
+                "fixture",
+                tree,
+                gix::commit::NO_PARENT_IDS,
+            )
+            .unwrap();
+        fs::create_dir_all(root.join("content")).unwrap();
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::create_dir_all(root.join("state/entries")).unwrap();
+        fs::write(root.join("content/item.md"), b"locally changed\n").unwrap();
+        fs::write(root.join("content/untracked.md"), b"untracked\n").unwrap();
+        fs::write(root.join("state/entries/item.toml"), b"reader-owned\n").unwrap();
+
+        assert_eq!(
+            worktree_changed_paths(&root, &commit.to_string(), &["content", "config"],).unwrap(),
+            [
+                "config/channels.toml",
+                "content/item.md",
+                "content/untracked.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn distinguishes_linear_and_divergent_history() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = gix::init(temporary.path().join("repository")).unwrap();
+        let identity = gix::actor::SignatureRef {
+            name: b"Plainfeed Test".as_bstr(),
+            email: b"test@plainfeed.invalid".as_bstr(),
+            time: "1784160000 +0900",
+        };
+        let base_tree = repository.empty_tree().id;
+        let base = repository
+            .commit_as(
+                identity,
+                identity,
+                "refs/heads/main",
+                "base",
+                base_tree,
+                gix::commit::NO_PARENT_IDS,
+            )
+            .unwrap();
+        let child = repository
+            .commit_as(
+                identity,
+                identity,
+                "refs/heads/child",
+                "child",
+                base_tree,
+                [base.detach()],
+            )
+            .unwrap();
+        let sibling = repository
+            .commit_as(
+                identity,
+                identity,
+                "refs/heads/sibling",
+                "sibling",
+                base_tree,
+                [base.detach()],
+            )
+            .unwrap();
+
+        assert!(is_ancestor(repository.path(), &base.to_string(), &child.to_string()).unwrap());
+        assert!(!is_ancestor(repository.path(), &child.to_string(), &sibling.to_string()).unwrap());
     }
 
     #[test]

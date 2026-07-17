@@ -492,6 +492,32 @@ impl ConflictReport {
     pub fn write_to(&self, repository_root: impl AsRef<Path>) -> Result<(), Error> {
         write_metadata(repository_root.as_ref(), "conflict.toml", self)
     }
+
+    pub fn read_from(repository_root: impl AsRef<Path>) -> Result<Option<Self>, Error> {
+        let path = repository_root.as_ref().join(".plainfeed/conflict.toml");
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(Error::Io { path, source }),
+        };
+        let report: Self =
+            toml::from_str(&text).map_err(|source| Error::ParseToml { path, source })?;
+        if report.format != CONFLICT_FORMAT {
+            return Err(Error::UnsupportedMetadataFormat {
+                format: report.format,
+            });
+        }
+        Ok(Some(report))
+    }
+
+    pub fn clear(repository_root: impl AsRef<Path>) -> Result<(), Error> {
+        let path = repository_root.as_ref().join(".plainfeed/conflict.toml");
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(Error::Io { path, source }),
+        }
+    }
 }
 
 fn write_metadata(
@@ -652,6 +678,14 @@ mod tests {
 
         let report = ConflictReport::new("diverged history", "2026-07-17T00:00:00Z");
         report.write_to(temporary.path()).unwrap();
+        assert_eq!(
+            ConflictReport::read_from(temporary.path()).unwrap(),
+            Some(report.clone())
+        );
+        assert_eq!(
+            ConflictReport::read_from(temporary.path()).unwrap(),
+            Some(report.clone())
+        );
 
         let sync_text = fs::read_to_string(temporary.path().join(".plainfeed/sync.toml")).unwrap();
         let conflict_text =
@@ -668,6 +702,8 @@ mod tests {
                     .to_string_lossy()
                     .ends_with(".tmp"))
         );
+        ConflictReport::clear(temporary.path()).unwrap();
+        assert_eq!(ConflictReport::read_from(temporary.path()).unwrap(), None);
     }
 
     #[test]
@@ -747,6 +783,13 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("config/channels.toml")).unwrap(),
             "live config"
+        );
+
+        ConflictReport::clear(temporary.path()).unwrap();
+        assert!(
+            ConflictReport::read_from(temporary.path())
+                .unwrap()
+                .is_none()
         );
     }
 

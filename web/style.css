@@ -39,6 +39,22 @@ button, textarea { font: inherit; }
 .site-header p { margin: 0; color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; font-size: 0.84rem; }
 .brand { color: var(--text); font-size: 1.3rem; font-weight: 750; text-decoration: none; letter-spacing: -0.035em; }
 .feed-shell { padding-top: 1rem; }
+.sync-conflict {
+  width: min(calc(100% - 2rem), var(--measure));
+  margin: 0 auto 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--accent);
+  border-radius: 0.55rem;
+  background: var(--accent-soft);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+.sync-conflict h2 { margin: 0 0 0.35rem; font-size: 1rem; }
+.sync-conflict p { margin: 0.3rem 0; }
+.sync-conflict dl { display: grid; gap: 0.3rem; margin: 0.6rem 0; font-size: 0.76rem; }
+.sync-conflict dl div { display: grid; grid-template-columns: 6rem minmax(0, 1fr); gap: 0.5rem; }
+.sync-conflict dt { color: var(--muted); }
+.sync-conflict dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.sync-conflict-help { color: var(--muted); font-size: 0.8rem; }
 .channel-tabs {
   display: flex;
   width: min(calc(100% - 2rem), var(--measure));

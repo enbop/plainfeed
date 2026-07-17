@@ -18,8 +18,8 @@ def packet_line(payload: bytes) -> bytes:
 
 class Handler(BaseHTTPRequestHandler):
     repository: Path
-    advance_on_first_push: bool = False
-    advanced: bool = False
+    advances_remaining: int = 0
+    advance_sequence: int = 0
 
     def do_GET(self) -> None:
         request = urlparse(self.path)
@@ -33,10 +33,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if (
             service == "git-receive-pack"
-            and self.advance_on_first_push
-            and not type(self).advanced
+            and type(self).advances_remaining > 0
         ):
-            type(self).advanced = True
+            type(self).advances_remaining -= 1
+            type(self).advance_sequence += 1
             self.advance_with_content_commit()
 
         advertised = subprocess.run(
@@ -86,21 +86,23 @@ class Handler(BaseHTTPRequestHandler):
                 ["git", "clone", "--quiet", str(self.repository), str(worktree)],
                 check=True,
             )
-            path = worktree / "content" / "2026" / "07" / "race-content.md"
+            suffix = "" if type(self).advance_sequence == 1 else f"-{type(self).advance_sequence}"
+            entry_id = f"race-content{suffix}"
+            path = worktree / "content" / "2026" / "07" / f"{entry_id}.md"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
                 """+++
 format = "plainfeed.entry/v1"
-id = "race-content"
+id = "{entry_id}"
 title = "Content committed during state publication"
 published = "2026-07-17T04:30:00Z"
 summary = "This entry verifies that a competing content commit is preserved."
 channels = ["technology"]
-source = { name = "Plainfeed test", url = "https://example.com/race-content" }
+source = {{ name = "Plainfeed test", url = "https://example.com/{entry_id}" }}
 +++
 
 The state publisher must rebuild its candidate on top of this commit.
-""",
+""".format(entry_id=entry_id),
                 encoding="utf-8",
             )
             environment = os.environ.copy()
@@ -133,9 +135,13 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=18080, type=int)
     parser.add_argument("--advance-on-first-push", action="store_true")
+    parser.add_argument("--advance-pushes", default=0, type=int)
     args = parser.parse_args()
     Handler.repository = args.repository.resolve()
-    Handler.advance_on_first_push = args.advance_on_first_push
+    Handler.advances_remaining = max(
+        args.advance_pushes,
+        1 if args.advance_on_first_push else 0,
+    )
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"serving {Handler.repository} at http://{args.host}:{args.port}/repo.git", flush=True)
     try:

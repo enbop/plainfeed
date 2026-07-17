@@ -52,3 +52,25 @@ wasmtime run \
 The host must preopen only the data checkout needed by the guest. Keep token
 files outside that checkout and unset credential environment variables after
 manual runs.
+
+## Conflict recovery
+
+Plainfeed pauses synchronization instead of merging when ownership, validation,
+or fast-forward rules fail. The reader continues serving the last valid feed
+and shows a warning. Inspect the machine-readable details with `status` or read
+`.plainfeed/conflict.toml` directly.
+
+Repair the cause without changing ownership boundaries: restore local
+`content/**` and `config/**` to the canonical commit, repair invalid producer
+content on the remote, or manually reconcile an unexpected remote `state/**`
+change. Explicitly acknowledge the inspected report, then force a new cycle:
+
+```sh
+wasmtime run --dir /path/to/plainfeed-data::/data \
+  target/wasm32-wasip2/release/plainfeed-sync.wasm acknowledge-conflict
+# Run `force` with the network and credential options shown above.
+```
+
+Acknowledgement removes only the local report; it does not change Git or data
+files. The next forced cycle validates the repair and recreates a report if the
+problem remains. Until acknowledgement, `tick` and `force` remain blocked.

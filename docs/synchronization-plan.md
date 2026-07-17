@@ -46,7 +46,12 @@ External writers must follow the [producer contract](producer-contract.md).
   parent, and clears only the captured markers after success. Wasmtime tests
   cover deterministic content/push races, offline dirty retention, real GitHub
   HTTPS/PAT publication, a fresh SSH clone, and native `git fsck --full`.
-- Phase 6 is the next implementation step.
+- Phase 6: every policy conflict persists a versioned report; `status` exposes
+  structured fields, while the reader shows a warning and keeps serving the
+  last valid snapshot. Unit and Wasmtime fixtures cover local ownership,
+  invalid content, remote state changes, divergent history, three exhausted
+  publication races, explicit acknowledgement, and repaired recovery.
+- Phase 7 is the next implementation step.
 
 ## Runtime topology
 

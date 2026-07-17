@@ -5,6 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 SOURCE=${1:-$ROOT/refs/plainfeed-playground}
 READER_PORT=${PLAINFEED_RACE_READER_PORT:-18084}
 GIT_PORT=${PLAINFEED_RACE_GIT_PORT:-18085}
+ADVANCES=${PLAINFEED_RACE_ADVANCES:-1}
 TEMPORARY=$(mktemp -d "${TMPDIR:-/tmp}/plainfeed-state-race.XXXXXX")
 REMOTE="$TEMPORARY/remote.git"
 REPOSITORY="$TEMPORARY/repository"
@@ -63,9 +64,11 @@ curl --fail --silent --request POST --data "favorite=$FAVORITE" \
 kill "$READER_PID"
 wait "$READER_PID" 2>/dev/null || true
 READER_PID=
+DIRTY_COUNT=$(find "$REPOSITORY/.plainfeed/dirty" -type f | wc -l | tr -d ' ')
+test "$DIRTY_COUNT" -ge 1
 
 python3 "$ROOT/experiments/git-wasi/support/git-smart-http-server.py" \
-  "$REMOTE" --port "$GIT_PORT" --advance-on-first-push \
+  "$REMOTE" --port "$GIT_PORT" --advance-pushes "$ADVANCES" \
   >"$GIT_LOG" 2>&1 &
 GIT_PID=$!
 attempt=0
@@ -82,12 +85,51 @@ done
 
 PLAINFEED_REMOTE_URL="http://127.0.0.1:$GIT_PORT/repo.git"
 export PLAINFEED_REMOTE_URL
-if ! wasmtime run \
+run_sync() {
+  wasmtime run \
   --env PLAINFEED_REMOTE_URL \
   -S inherit-network=y \
   --dir "$REPOSITORY::/data" \
-  "$ROOT/target/wasm32-wasip2/debug/plainfeed-sync.wasm" force \
-  >"$SYNC_LOG" 2>&1; then
+  "$ROOT/target/wasm32-wasip2/debug/plainfeed-sync.wasm" "$1"
+}
+
+if [ "$ADVANCES" -ge 3 ]; then
+  if run_sync force >"$SYNC_LOG" 2>&1; then
+    echo "state publication unexpectedly survived three remote advances" >&2
+    exit 1
+  fi
+  test "$(find "$REPOSITORY/.plainfeed/dirty" -type f | wc -l | tr -d ' ')" -eq \
+    "$DIRTY_COUNT"
+  test -f "$REPOSITORY/.plainfeed/conflict.toml"
+  REMOTE_HEAD=$(git --git-dir "$REMOTE" rev-parse refs/heads/main)
+  grep -q 'lost the remote race three times' "$REPOSITORY/.plainfeed/conflict.toml"
+  grep -q "remote_tip = \"$REMOTE_HEAD\"" "$REPOSITORY/.plainfeed/conflict.toml"
+  STATUS=$(wasmtime run \
+    --dir "$REPOSITORY::/data" \
+    "$ROOT/target/wasm32-wasip2/debug/plainfeed-sync.wasm" status)
+  case "$STATUS" in
+    *"conflict_active=true"*"lost the remote race three times"*) ;;
+    *) echo "retry exhaustion was not exposed by status" >&2; exit 1 ;;
+  esac
+  wasmtime run \
+    --dir "$REPOSITORY::/data" \
+    "$ROOT/target/wasm32-wasip2/debug/plainfeed-sync.wasm" \
+    acknowledge-conflict >/dev/null
+  if ! run_sync force >"$SYNC_LOG" 2>&1; then
+    sed -n '1,200p' "$SYNC_LOG" >&2
+    exit 1
+  fi
+  grep -q '^push=completed$' "$SYNC_LOG"
+  test ! -f "$REPOSITORY/.plainfeed/conflict.toml"
+  test "$(find "$REPOSITORY/.plainfeed/dirty" -type f | wc -l | tr -d ' ')" -eq 0
+  test -f "$REPOSITORY/content/2026/07/race-content-3.md"
+  git --git-dir "$REMOTE" fsck --full >/dev/null
+  git -C "$REPOSITORY" fsck --full >/dev/null
+  echo "Plainfeed reported and recovered from exhausted state-publication races"
+  exit 0
+fi
+
+if ! run_sync force >"$SYNC_LOG" 2>&1; then
   sed -n '1,200p' "$SYNC_LOG" >&2
   sed -n '1,200p' "$GIT_LOG" >&2
   exit 1

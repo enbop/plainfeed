@@ -14,7 +14,7 @@ mod state_commit;
 
 pub use fetch::{
     FetchOutcome, FetchRequest, changed_paths, commit_root_entry_oid, export_remote_snapshot,
-    fetch, finalize_fast_forward_checkout, reference_oid,
+    fetch, finalize_fast_forward_checkout, is_ancestor, reference_oid, worktree_changed_paths,
 };
 pub use push::{PushOutcome, push_one_commit};
 pub use state_commit::{StateCommit, create_state_commit};
