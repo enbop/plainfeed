@@ -27,7 +27,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 git clone --quiet --bare "$SOURCE" "$REMOTE"
-git clone --quiet "$REMOTE" "$LIVE"
+mkdir "$LIVE"
 git clone --quiet "$REMOTE" "$PRODUCER"
 mkdir -p "$PRODUCER/content/2026/07"
 cp "$ROOT/experiments/wasmtime-run-service/fixtures/service-content.md" \
@@ -103,6 +103,9 @@ until test -f "$LIVE/content/2026/07/service-daemon-content.md"; do
 done
 curl --fail --silent "http://127.0.0.1:$HTTP_PORT/" \
   | grep -q 'A single WASI service pulled this entry'
+test "$(git -C "$LIVE" symbolic-ref HEAD)" = refs/heads/main
+test "$(git -C "$LIVE" rev-parse refs/heads/main)" = "$CONTENT_HEAD"
+test -z "$(git -C "$LIVE" status --short)"
 
 STATE="$LIVE/state/entries/20260717-wasip2-reader.toml"
 if grep -q '^favorite = true$' "$STATE"; then

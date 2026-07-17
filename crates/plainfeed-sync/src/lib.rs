@@ -43,6 +43,8 @@ pub enum Error {
     LocalOwnership { paths: Vec<String> },
     #[error("synchronization is blocked by an active conflict: {reason}")]
     ConflictActive { reason: String },
+    #[error("cannot initialize Git because the data directory contains {path}")]
+    InitializationTargetNotEmpty { path: PathBuf },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -195,6 +197,9 @@ pub async fn run_pull_cycle(
     now: OffsetDateTime,
 ) -> Result<bool, Error> {
     let repository_root = repository_root.into();
+    if initialize_repository_if_needed(&repository_root, remote.clone(), now).await? {
+        return Ok(true);
+    }
     ensure_no_active_conflict(&repository_root)?;
     preflight_repository_contract(&repository_root, now)?;
     let mut state = SyncState::read_from(&repository_root)?
@@ -255,6 +260,128 @@ pub async fn run_pull_cycle(
     state.last_error = None;
     state.write_to(&repository_root)?;
     Ok(true)
+}
+
+async fn initialize_repository_if_needed(
+    repository_root: &std::path::Path,
+    remote: plainfeed_git::Remote,
+    now: OffsetDateTime,
+) -> Result<bool, Error> {
+    if plainfeed_git::reference_exists(repository_root, "refs/heads/main")? {
+        return Ok(false);
+    }
+    ensure_initialization_target_is_empty(repository_root)?;
+    if ConflictReport::read_from(repository_root)?
+        .is_some_and(|report| report.local_base.is_none() && report.remote_tip.is_none())
+    {
+        ConflictReport::clear(repository_root)?;
+    }
+
+    let remote_url = remote.url().to_owned();
+    let fetched =
+        plainfeed_git::fetch(plainfeed_git::FetchRequest::main(repository_root, remote)).await?;
+    let paths = plainfeed_git::changed_paths(repository_root, None, &fetched.remote_tip)?;
+    let Some(state_tree) = fetched.state_tree else {
+        return Err(Error::MissingStateTree);
+    };
+    audit_remote_changes(
+        paths.iter().map(String::as_str),
+        Some(&state_tree),
+        Some(&state_tree),
+    )?;
+
+    let staging = repository_root
+        .join(".plainfeed/staging")
+        .join(format!("initial-{}", fetched.remote_tip));
+    if staging.exists() {
+        fs::remove_dir_all(&staging).map_err(|source| plainfeed_sync_core::Error::Io {
+            path: staging.clone(),
+            source,
+        })?;
+    }
+    plainfeed_git::export_initial_snapshot(repository_root, &fetched.remote_tip, &staging)?;
+    Store::open(&staging).validate()?;
+
+    let mut installed = Vec::new();
+    let installation = (|| -> Result<(), Error> {
+        let entries = fs::read_dir(&staging).map_err(|source| plainfeed_sync_core::Error::Io {
+            path: staging.clone(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| plainfeed_sync_core::Error::Io {
+                path: staging.clone(),
+                source,
+            })?;
+            let destination = repository_root.join(entry.file_name());
+            if destination.exists() {
+                return Err(Error::InitializationTargetNotEmpty { path: destination });
+            }
+            fs::rename(entry.path(), &destination).map_err(|source| {
+                plainfeed_sync_core::Error::Io {
+                    path: destination.clone(),
+                    source,
+                }
+            })?;
+            installed.push(destination);
+        }
+        plainfeed_git::set_head_branch(repository_root, "main")?;
+        plainfeed_git::finalize_fast_forward_checkout(
+            repository_root,
+            "main",
+            None,
+            &fetched.remote_tip,
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = installation {
+        for path in installed.iter().rev() {
+            remove_path(path);
+        }
+        return Err(error);
+    }
+    let _ = fs::remove_dir_all(&staging);
+
+    let timestamp = now
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+    let mut state = SyncState::new("origin", "refs/heads/main");
+    state.remote_url = Some(remote_url);
+    state.last_remote_oid = Some(fetched.remote_tip);
+    state.last_state_tree_oid = Some(state_tree);
+    state.last_pull_at = Some(timestamp);
+    state.last_error = None;
+    state.write_to(repository_root)?;
+    Ok(true)
+}
+
+fn ensure_initialization_target_is_empty(repository_root: &std::path::Path) -> Result<(), Error> {
+    fs::create_dir_all(repository_root).map_err(|source| plainfeed_sync_core::Error::Io {
+        path: repository_root.to_owned(),
+        source,
+    })?;
+    for entry in fs::read_dir(repository_root).map_err(|source| plainfeed_sync_core::Error::Io {
+        path: repository_root.to_owned(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| plainfeed_sync_core::Error::Io {
+            path: repository_root.to_owned(),
+            source,
+        })?;
+        if matches!(entry.file_name().to_str(), Some(".git" | ".plainfeed")) {
+            continue;
+        }
+        return Err(Error::InitializationTargetNotEmpty { path: entry.path() });
+    }
+    Ok(())
+}
+
+fn remove_path(path: &std::path::Path) {
+    if path.is_dir() {
+        let _ = fs::remove_dir_all(path);
+    } else {
+        let _ = fs::remove_file(path);
+    }
 }
 
 pub async fn publish_state(

@@ -162,8 +162,8 @@ comments implemented with server-rendered HTML and htmx.
 
 ### 5. Add synchronization adapters
 
-Status: architecture and phased implementation planned. The live data checkout
-and pull-only path come before state publication.
+Status: an empty data directory can be bootstrapped into a validated `main`
+checkout, and the live pull/publication path is implemented.
 
 - Define safe commit boundaries and conflict policies.
 - Implement or integrate the required Git subset.

@@ -372,6 +372,37 @@ pub fn export_remote_snapshot(
     result
 }
 
+/// Export the complete, already-audited v1 data snapshot for first checkout.
+pub fn export_initial_snapshot(
+    repository_path: impl AsRef<Path>,
+    commit_oid: &str,
+    destination: impl AsRef<Path>,
+) -> Result<(), Error> {
+    let repository = gix::open(repository_path.as_ref()).map_err(git_error)?;
+    let oid = gix::hash::ObjectId::from_hex(commit_oid.as_bytes()).map_err(git_error)?;
+    let root_tree = repository
+        .find_commit(oid)
+        .map_err(git_error)?
+        .tree()
+        .map_err(git_error)?;
+    let destination = destination.as_ref();
+    if destination.exists() {
+        return Err(Error::Git(format!(
+            "initial snapshot destination already exists: {}",
+            destination.display()
+        )));
+    }
+    fs::create_dir_all(destination).map_err(|source| Error::Io {
+        path: destination.to_owned(),
+        source,
+    })?;
+    let result = export_tree(&root_tree, destination);
+    if result.is_err() {
+        let _ = fs::remove_dir_all(destination);
+    }
+    result
+}
+
 pub fn commit_root_entry_oid(
     repository_path: impl AsRef<Path>,
     commit_oid: &str,
@@ -406,6 +437,34 @@ pub fn reference_oid(
         .into_fully_peeled_id()
         .map_err(git_error)?
         .to_string())
+}
+
+pub fn reference_exists(
+    repository_path: impl AsRef<Path>,
+    reference_name: &str,
+) -> Result<bool, Error> {
+    let repository_path = repository_path.as_ref();
+    let repository = match gix::open(repository_path) {
+        Ok(repository) => repository,
+        Err(_) if !repository_path.join(".git").exists() => return Ok(false),
+        Err(error) => return Err(git_error(error)),
+    };
+    repository
+        .try_find_reference(reference_name)
+        .map(|reference| reference.is_some())
+        .map_err(git_error)
+}
+
+pub fn set_head_branch(repository_path: impl AsRef<Path>, branch: &str) -> Result<(), Error> {
+    validate_branch(branch)?;
+    let repository = gix::open(repository_path.as_ref()).map_err(git_error)?;
+    let head = repository.git_dir().join("HEAD");
+    let temporary = repository.git_dir().join("HEAD.plainfeed.tmp");
+    fs::write(&temporary, format!("ref: refs/heads/{branch}\n")).map_err(|source| Error::Io {
+        path: temporary.clone(),
+        source,
+    })?;
+    fs::rename(&temporary, &head).map_err(|source| Error::Io { path: head, source })
 }
 
 pub fn delete_plainfeed_reference(
@@ -675,9 +734,10 @@ mod tests {
     use gix::{bstr::ByteSlice, objs::tree::EntryKind};
 
     use super::{
-        changed_paths, delete_plainfeed_reference, export_remote_snapshot,
-        finalize_fast_forward_checkout, is_ancestor, validate_branch, validate_repository_contract,
-        validate_snapshot_objects, worktree_changed_paths,
+        changed_paths, delete_plainfeed_reference, export_initial_snapshot, export_remote_snapshot,
+        finalize_fast_forward_checkout, is_ancestor, reference_exists, set_head_branch,
+        validate_branch, validate_repository_contract, validate_snapshot_objects,
+        worktree_changed_paths,
     };
 
     #[test]
@@ -882,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn exports_only_content_and_config_from_a_fetched_commit() {
+    fn exports_update_and_initial_snapshots_with_distinct_ownership() {
         let temporary = tempfile::tempdir().unwrap();
         let repository = gix::init(temporary.path().join("repository")).unwrap();
         let content = repository.write_blob(b"entry body\n").unwrap();
@@ -927,6 +987,26 @@ mod tests {
             "channel config\n"
         );
         assert!(!staging.join("state").exists());
+
+        let initial = temporary.path().join("staging/initial");
+        export_initial_snapshot(repository.path(), &commit.to_string(), &initial).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(initial.join("state/entries/private.toml")).unwrap(),
+            "must not export\n"
+        );
+    }
+
+    #[test]
+    fn points_an_unborn_checkout_head_at_main() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = gix::init(temporary.path().join("repository")).unwrap();
+
+        assert!(!reference_exists(repository.path(), "refs/heads/main").unwrap());
+        set_head_branch(repository.path(), "main").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repository.git_dir().join("HEAD")).unwrap(),
+            "ref: refs/heads/main\n"
+        );
     }
 
     #[test]
