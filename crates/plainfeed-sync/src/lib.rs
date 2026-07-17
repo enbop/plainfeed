@@ -389,6 +389,7 @@ pub async fn publish_state(
             dirty_snapshot.clone(),
             &timestamp,
             &remote_url,
+            &candidate_ref,
         );
         pending.write_to(&repository_root)?;
         match plainfeed_git::push_one_commit(
@@ -416,10 +417,12 @@ pub async fn publish_state(
                     &timestamp,
                 )?;
                 journal.clear_snapshot(&dirty_snapshot)?;
+                plainfeed_git::delete_plainfeed_reference(&repository_root, &candidate_ref)?;
                 PendingPush::clear(&repository_root)?;
                 return Ok(PublishOutcome::Pushed(outcome));
             }
             Err(plainfeed_git::Error::StaleRemote { parent, remote }) => {
+                plainfeed_git::delete_plainfeed_reference(&repository_root, &candidate_ref)?;
                 PendingPush::clear(&repository_root)?;
                 last_stale_remote = Some((parent, remote));
                 continue;
@@ -465,6 +468,7 @@ async fn recover_pending_push(
     let fetched =
         plainfeed_git::fetch(plainfeed_git::FetchRequest::main(repository_root, remote)).await?;
     if fetched.remote_tip == pending.previous_remote {
+        plainfeed_git::delete_plainfeed_reference(repository_root, &pending.candidate_ref)?;
         PendingPush::clear(repository_root)?;
         return Ok(false);
     }
@@ -508,16 +512,28 @@ async fn recover_pending_push(
 
     let mut state = SyncState::read_from(repository_root)?
         .unwrap_or_else(|| SyncState::new("origin", "refs/heads/main"));
+    let pushed_commit = pending.pushed_commit.clone();
+    let state_tree = pending.state_tree.clone();
     state.remote_url = Some(pending.remote_url.clone());
     finalize_publication_state(
         repository_root,
         &mut state,
-        &pending.pushed_commit,
-        Some(pending.state_tree),
+        &pushed_commit,
+        Some(state_tree.clone()),
         &pending.pushed_at,
     )?;
     DirtyJournal::new(repository_root).clear_snapshot(&pending.dirty_markers)?;
+    plainfeed_git::delete_plainfeed_reference(repository_root, &pending.candidate_ref)?;
     PendingPush::clear(repository_root)?;
+    if fetched.remote_tip != pushed_commit {
+        activate_fetched_snapshot(ActivationRequest {
+            repository_root: repository_root.to_owned(),
+            branch: "main".to_owned(),
+            expected_base: pushed_commit,
+            remote_tip: fetched.remote_tip,
+            trusted_state_tree: state_tree,
+        })?;
+    }
     Ok(true)
 }
 

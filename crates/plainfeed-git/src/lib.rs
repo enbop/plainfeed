@@ -13,8 +13,8 @@ mod push;
 mod state_commit;
 
 pub use fetch::{
-    FetchOutcome, FetchRequest, changed_paths, commit_root_entry_oid, export_remote_snapshot,
-    fetch, finalize_fast_forward_checkout, is_ancestor, reference_oid,
+    FetchOutcome, FetchRequest, changed_paths, commit_root_entry_oid, delete_plainfeed_reference,
+    export_remote_snapshot, fetch, finalize_fast_forward_checkout, is_ancestor, reference_oid,
     validate_repository_contract, worktree_changed_paths,
 };
 pub use push::{PushOutcome, push_one_commit};
@@ -77,6 +77,8 @@ impl Remote {
 pub struct FetchLimits {
     pub max_response_bytes: usize,
     pub max_repository_bytes: u64,
+    pub max_object_count: usize,
+    pub max_object_bytes: usize,
 }
 
 impl Default for FetchLimits {
@@ -84,6 +86,8 @@ impl Default for FetchLimits {
         Self {
             max_response_bytes: 64 * 1024 * 1024,
             max_repository_bytes: 256 * 1024 * 1024,
+            max_object_count: 100_000,
+            max_object_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -99,6 +103,26 @@ impl FetchLimits {
             });
         }
         Ok(bytes)
+    }
+
+    pub fn check_object_count(&self, count: usize) -> Result<(), Error> {
+        if count > self.max_object_count {
+            return Err(Error::TooManyObjects {
+                count,
+                limit: self.max_object_count,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn check_object_size(&self, bytes: usize) -> Result<(), Error> {
+        if bytes > self.max_object_bytes {
+            return Err(Error::ObjectTooLarge {
+                bytes,
+                limit: self.max_object_bytes,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -167,6 +191,10 @@ pub enum Error {
     StaleRemote { parent: String, remote: String },
     #[error("generated push pack uses {bytes} bytes, over the {limit}-byte limit")]
     PushTooLarge { bytes: usize, limit: usize },
+    #[error("snapshot contains {count} objects, over the {limit}-object limit")]
+    TooManyObjects { count: usize, limit: usize },
+    #[error("Git object uses {bytes} bytes, over the {limit}-byte object limit")]
+    ObjectTooLarge { bytes: usize, limit: usize },
     #[error("remote does not advertise required ref {name}")]
     MissingRemoteRef { name: String },
     #[error("local repository does not contain required ref {name}")]
@@ -266,9 +294,15 @@ mod tests {
         let limits = FetchLimits {
             max_response_bytes: 32,
             max_repository_bytes: 9,
+            max_object_count: 2,
+            max_object_bytes: 5,
         };
         assert_eq!(limits.check_repository(temporary.path()).unwrap(), 9);
         fs::write(temporary.path().join("objects/three"), b"x").unwrap();
         assert!(limits.check_repository(temporary.path()).is_err());
+        limits.check_object_count(2).unwrap();
+        assert!(limits.check_object_count(3).is_err());
+        limits.check_object_size(5).unwrap();
+        assert!(limits.check_object_size(6).is_err());
     }
 }

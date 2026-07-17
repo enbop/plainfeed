@@ -101,6 +101,10 @@ pub async fn push_one_commit(
     let mut objects = Vec::new();
     collect_object(&repository, local, &mut seen, &mut objects)?;
     collect_tree(&repository, tree, &mut seen, &mut objects)?;
+    limits.check_object_count(objects.len())?;
+    for object in &objects {
+        limits.check_object_size(object.data.len())?;
+    }
     let pack = create_pack(objects)?;
     if pack.len() > limits.max_response_bytes {
         return Err(Error::PushTooLarge {

@@ -436,6 +436,7 @@ pub struct PendingPush {
     pub dirty_markers: Vec<String>,
     pub pushed_at: String,
     pub remote_url: String,
+    pub candidate_ref: String,
 }
 
 impl PendingPush {
@@ -446,6 +447,7 @@ impl PendingPush {
         dirty_markers: Vec<String>,
         pushed_at: impl Into<String>,
         remote_url: impl Into<String>,
+        candidate_ref: impl Into<String>,
     ) -> Self {
         Self {
             format: PENDING_PUSH_FORMAT.to_owned(),
@@ -455,6 +457,7 @@ impl PendingPush {
             dirty_markers,
             pushed_at: pushed_at.into(),
             remote_url: remote_url.into(),
+            candidate_ref: candidate_ref.into(),
         }
     }
 
@@ -791,6 +794,7 @@ mod tests {
             vec!["marker-a.toml".to_owned()],
             "2026-07-17T06:00:00Z",
             "https://example.com/repository.git",
+            "refs/plainfeed/state-candidate-test",
         );
         pending.write_to(temporary.path()).unwrap();
         assert_eq!(

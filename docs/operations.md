@@ -10,8 +10,10 @@ at a glance as `synced`, `local changes pending`, `sync delayed`, `sync
 recovery pending`, or `sync paused`.
 
 The adapter bounds each Git HTTP response and generated push pack to 64 MiB,
-the local object database to 256 MiB, and connection setup to 20 seconds.
-Persisted command errors are truncated to 4096 characters. Authentication,
+the local object database to 256 MiB, each reachable object to 16 MiB, and a
+fetched or pushed snapshot to 100,000 objects. Connection setup is limited to
+20 seconds and a complete HTTP request to 30 seconds. Persisted command errors
+are truncated to 4096 characters. Authentication,
 timeouts, HTTP errors, corrupt protocol responses, repository growth, and file
 system errors fail the cycle without activating fetched files or clearing
 dirty markers.

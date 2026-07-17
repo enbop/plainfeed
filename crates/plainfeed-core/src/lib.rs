@@ -362,6 +362,17 @@ impl Store {
     }
 
     pub fn write_state(&self, state: &EntryState) -> Result<(), Error> {
+        self.write_state_with(state, |file, text| {
+            file.write_all(text.as_bytes())?;
+            file.sync_all()
+        })
+    }
+
+    fn write_state_with(
+        &self,
+        state: &EntryState,
+        write_temporary: impl FnOnce(&mut fs::File, &str) -> io::Result<()>,
+    ) -> Result<(), Error> {
         validate_id(&state.entry_id, &self.root)?;
         let directory = self.root.join("state/entries");
         fs::create_dir_all(&directory).map_err(|source| Error::Io {
@@ -380,12 +391,10 @@ impl Store {
                 path: temporary.clone(),
                 source,
             })?;
-            file.write_all(text.as_bytes())
-                .and_then(|_| file.sync_all())
-                .map_err(|source| Error::Io {
-                    path: temporary.clone(),
-                    source,
-                })?;
+            write_temporary(&mut file, &text).map_err(|source| Error::Io {
+                path: temporary.clone(),
+                source,
+            })?;
             fs::rename(&temporary, &destination).map_err(|source| Error::Io {
                 path: destination.clone(),
                 source,
@@ -679,6 +688,35 @@ This is **file-backed** content.
 
         assert!(store.write_state(&EntryState::new("hello-wasi")).is_err());
         assert!(!temporary.path().join(".plainfeed/dirty").exists());
+    }
+
+    #[test]
+    fn simulated_disk_exhaustion_preserves_old_state_and_clean_journal() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("state/entries/hello-wasi.toml");
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        let old = "format = \"plainfeed.state/v1\"\nentry_id = \"hello-wasi\"\nfavorite = false\n";
+        fs::write(&destination, old).unwrap();
+        let store = Store::open(temporary.path());
+        let mut state = EntryState::new("hello-wasi");
+        state.favorite = true;
+
+        let result = store.write_state_with(&state, |_file, _text| {
+            Err(io::Error::other("simulated disk exhaustion"))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&destination).unwrap(), old);
+        assert!(!temporary.path().join(".plainfeed/dirty").exists());
+        assert!(
+            fs::read_dir(destination.parent().unwrap())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp"))
+        );
     }
 
     #[test]

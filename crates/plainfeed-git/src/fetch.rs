@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::atomic::AtomicBool,
@@ -93,6 +93,7 @@ pub async fn fetch(request: FetchRequest) -> Result<FetchOutcome, Error> {
         .into_fully_peeled_id()
         .map_err(git_error)?;
     let commit = reopened.find_commit(tip).map_err(git_error)?;
+    validate_snapshot_objects(&reopened, tip.detach(), request.limits)?;
     let tree = commit.tree().map_err(git_error)?;
     let state_tree = tree
         .find_entry("state")
@@ -105,6 +106,59 @@ pub async fn fetch(request: FetchRequest) -> Result<FetchOutcome, Error> {
         remote_refs: outcome.ref_map.remote_refs.len(),
         repository_bytes,
     })
+}
+
+fn validate_snapshot_objects(
+    repository: &gix::Repository,
+    commit_id: gix::hash::ObjectId,
+    limits: FetchLimits,
+) -> Result<(), Error> {
+    let mut seen = HashSet::new();
+    validate_one_object(repository, commit_id, &mut seen, limits, false)?;
+    let tree = repository
+        .find_commit(commit_id)
+        .map_err(git_error)?
+        .tree_id()
+        .map_err(git_error)?
+        .detach();
+    validate_one_object(repository, tree, &mut seen, limits, true)
+}
+
+fn validate_one_object(
+    repository: &gix::Repository,
+    id: gix::hash::ObjectId,
+    seen: &mut HashSet<gix::hash::ObjectId>,
+    limits: FetchLimits,
+    recurse_tree: bool,
+) -> Result<(), Error> {
+    if !seen.insert(id) {
+        return Ok(());
+    }
+    limits.check_object_count(seen.len())?;
+    let object = repository.find_object(id).map_err(git_error)?;
+    limits.check_object_size(object.data.len())?;
+    if !recurse_tree {
+        return Ok(());
+    }
+    if object.kind != gix::objs::Kind::Tree {
+        return Err(Error::Git(format!(
+            "expected tree {id}, found {:?}",
+            object.kind
+        )));
+    }
+    let entries = gix::objs::TreeRefIter::from_bytes(&object.data, id.kind())
+        .map(|entry| entry.map(|entry| (entry.mode, entry.oid.to_owned())))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(git_error)?;
+    for (mode, child) in entries {
+        if mode.kind() == EntryKind::Commit {
+            return Err(Error::Git(
+                "submodules are not supported in fetched trees".to_owned(),
+            ));
+        }
+        validate_one_object(repository, child, seen, limits, mode.is_tree())?;
+    }
+    Ok(())
 }
 
 pub fn changed_paths(
@@ -352,6 +406,25 @@ pub fn reference_oid(
         .into_fully_peeled_id()
         .map_err(git_error)?
         .to_string())
+}
+
+pub fn delete_plainfeed_reference(
+    repository_path: impl AsRef<Path>,
+    reference_name: &str,
+) -> Result<(), Error> {
+    if !reference_name.starts_with("refs/plainfeed/") {
+        return Err(Error::Git(format!(
+            "refusing to delete non-Plainfeed reference {reference_name:?}"
+        )));
+    }
+    let repository = gix::open(repository_path.as_ref()).map_err(git_error)?;
+    if let Some(reference) = repository
+        .try_find_reference(reference_name)
+        .map_err(git_error)?
+    {
+        reference.delete().map_err(git_error)?;
+    }
+    Ok(())
 }
 
 pub fn validate_repository_contract(repository_path: impl AsRef<Path>) -> Result<(), Error> {
@@ -602,8 +675,9 @@ mod tests {
     use gix::{bstr::ByteSlice, objs::tree::EntryKind};
 
     use super::{
-        changed_paths, export_remote_snapshot, finalize_fast_forward_checkout, is_ancestor,
-        validate_branch, validate_repository_contract, worktree_changed_paths,
+        changed_paths, delete_plainfeed_reference, export_remote_snapshot,
+        finalize_fast_forward_checkout, is_ancestor, validate_branch, validate_repository_contract,
+        validate_snapshot_objects, worktree_changed_paths,
     };
 
     #[test]
@@ -735,6 +809,76 @@ mod tests {
             validate_repository_contract(&sha256),
             Err(crate::Error::UnsupportedObjectFormat { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_snapshot_object_count_and_single_object_overages() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = gix::init(temporary.path().join("repository")).unwrap();
+        let blob = repository.write_blob(b"sixteen-byte-ish").unwrap();
+        let mut editor = repository.edit_tree(repository.empty_tree().id).unwrap();
+        editor
+            .upsert("content/item.md", EntryKind::Blob, blob)
+            .unwrap();
+        let tree = editor.write().unwrap();
+        let identity = gix::actor::SignatureRef {
+            name: b"Plainfeed Test".as_bstr(),
+            email: b"test@plainfeed.invalid".as_bstr(),
+            time: "1784160000 +0900",
+        };
+        let commit = repository
+            .commit_as(
+                identity,
+                identity,
+                "refs/heads/main",
+                "fixture",
+                tree,
+                gix::commit::NO_PARENT_IDS,
+            )
+            .unwrap();
+        let mut limits = crate::FetchLimits::default();
+        limits.max_object_bytes = 4;
+        assert!(matches!(
+            validate_snapshot_objects(&repository, commit.detach(), limits),
+            Err(crate::Error::ObjectTooLarge { .. })
+        ));
+
+        limits.max_object_bytes = usize::MAX;
+        limits.max_object_count = 2;
+        assert!(matches!(
+            validate_snapshot_objects(&repository, commit.detach(), limits),
+            Err(crate::Error::TooManyObjects { .. })
+        ));
+    }
+
+    #[test]
+    fn deletes_only_plainfeed_internal_references() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = gix::init(temporary.path().join("repository")).unwrap();
+        let identity = gix::actor::SignatureRef {
+            name: b"Plainfeed Test".as_bstr(),
+            email: b"test@plainfeed.invalid".as_bstr(),
+            time: "1784160000 +0900",
+        };
+        repository
+            .commit_as(
+                identity,
+                identity,
+                "refs/plainfeed/candidate",
+                "candidate",
+                repository.empty_tree().id,
+                gix::commit::NO_PARENT_IDS,
+            )
+            .unwrap();
+
+        delete_plainfeed_reference(repository.path(), "refs/plainfeed/candidate").unwrap();
+        assert!(
+            repository
+                .try_find_reference("refs/plainfeed/candidate")
+                .unwrap()
+                .is_none()
+        );
+        assert!(delete_plainfeed_reference(repository.path(), "refs/heads/main").is_err());
     }
 
     #[test]

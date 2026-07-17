@@ -32,6 +32,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             "PLAINFEED_MAX_REPOSITORY_BYTES",
             request.limits.max_repository_bytes,
         )?,
+        max_object_count: usize_from_env(
+            "PLAINFEED_MAX_OBJECT_COUNT",
+            request.limits.max_object_count,
+        )?,
+        max_object_bytes: usize_from_env(
+            "PLAINFEED_MAX_OBJECT_BYTES",
+            request.limits.max_object_bytes,
+        )?,
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
