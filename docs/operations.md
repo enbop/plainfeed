@@ -64,6 +64,9 @@ acknowledge-and-force flow.
   HTTP response and proves idempotent recovery.
 - `scripts/verify-concurrent-state-push-wasmtime.sh` mutates reader state while
   push completion is delayed and proves the new dirty marker survives.
+- `scripts/verify-network-failures-wasmtime.sh` injects an HTTP 429, a truncated
+  upload-pack response, and a request timeout, then proves the next forced
+  cycle recovers without premature activation.
 - `scripts/verify-state-push-github-wasmtime.sh` performs the real GitHub
   HTTPS/PAT push and verifies a fresh SSH clone plus `git fsck --full`.
 - `scripts/verify-conflict-fixtures-wasmtime.sh` covers remote state,
