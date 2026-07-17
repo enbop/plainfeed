@@ -149,6 +149,7 @@ fn render_feed(data_root: &Path, selected_channel: Option<&str>, fragment: bool)
                 .filter(|entry| entry.state.read_at.is_none())
                 .count();
             let shell = render_feed_shell(&entries, &channels, selected_channel, conflict.as_ref());
+            let sync_summary = render_sync_summary(data_root);
             if fragment {
                 return Response::text(200, "text/html; charset=utf-8", shell);
             }
@@ -167,18 +168,51 @@ fn render_feed(data_root: &Path, selected_channel: Option<&str>, fragment: bool)
 <body hx-history="false">
   <header class="site-header">
     <a class="brand" href="/" aria-label="Plainfeed home">Plainfeed</a>
-    <p><strong>{}</strong> unread · <strong>{}</strong> total</p>
+    <p><strong>{}</strong> unread · <strong>{}</strong> total <span class="sync-summary">· {}</span></p>
   </header>
   {}
 </body>
 </html>"#,
                 unread,
                 entries.len(),
+                sync_summary,
                 shell
             );
             Response::text(200, "text/html; charset=utf-8", document)
         }
         (Err(error), _) | (_, Err(error)) => server_error(error),
+    }
+}
+
+fn render_sync_summary(data_root: &Path) -> String {
+    if plainfeed_sync_core::ConflictReport::read_from(data_root)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return "sync paused".to_owned();
+    }
+    if plainfeed_sync_core::PendingPush::read_from(data_root)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return "sync recovery pending".to_owned();
+    }
+    let dirty = plainfeed_sync_core::DirtyJournal::new(data_root)
+        .snapshot()
+        .map(|markers| markers.len())
+        .unwrap_or_default();
+    if dirty > 0 {
+        return format!(
+            "{dirty} local change{} pending",
+            if dirty == 1 { "" } else { "s" }
+        );
+    }
+    match plainfeed_sync_core::SyncState::read_from(data_root) {
+        Ok(Some(state)) if state.last_error.is_some() => "sync delayed".to_owned(),
+        Ok(Some(state)) if state.last_pull_at.is_some() => "synced".to_owned(),
+        _ => "local only".to_owned(),
     }
 }
 
@@ -593,6 +627,7 @@ mod tests {
         assert!(body.contains("aaa"));
         assert!(body.contains("bbb"));
         assert!(body.contains("Your feed is empty"));
+        assert!(body.contains("sync paused"));
     }
 
     #[test]

@@ -74,6 +74,7 @@ fn new_dns_resolver() -> Result<TokioResolver, NetError> {
 fn client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .dns_resolver(WasiDnsResolver::default())
         .build()

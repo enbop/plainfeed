@@ -74,3 +74,7 @@ wasmtime run --dir /path/to/plainfeed-data::/data \
 Acknowledgement removes only the local report; it does not change Git or data
 files. The next forced cycle validates the repair and recreates a report if the
 problem remains. Until acknowledgement, `tick` and `force` remain blocked.
+
+See [operations.md](operations.md) for pending-push recovery, interrupted local
+activation recovery, bounded failure behavior, native Git diagnostics, and the
+complete regression suite.

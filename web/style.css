@@ -37,6 +37,7 @@ button, textarea { font: inherit; }
 }
 
 .site-header p { margin: 0; color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; font-size: 0.84rem; }
+.sync-summary { white-space: nowrap; }
 .brand { color: var(--text); font-size: 1.3rem; font-weight: 750; text-decoration: none; letter-spacing: -0.035em; }
 .feed-shell { padding-top: 1rem; }
 .sync-conflict {

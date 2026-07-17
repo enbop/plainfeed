@@ -39,11 +39,16 @@ pub struct FetchOutcome {
 
 pub async fn fetch(request: FetchRequest) -> Result<FetchOutcome, Error> {
     validate_branch(&request.branch)?;
+    validate_configured_object_format(&request.repository)?;
     let mut repository = match gix::open(&request.repository) {
         Ok(repository) => repository,
-        Err(_) => gix::init(&request.repository).map_err(git_error)?,
+        Err(_) if !request.repository.join(".git").exists() => {
+            gix::init(&request.repository).map_err(git_error)?
+        }
+        Err(error) => return Err(git_error(error)),
     };
     request.limits.check_repository(repository.git_dir())?;
+    validate_object_format(&repository)?;
     repository
         .committer_or_set_generic_fallback()
         .map_err(git_error)?;
@@ -68,7 +73,18 @@ pub async fn fetch(request: FetchRequest) -> Result<FetchOutcome, Error> {
     let outcome = prepared
         .receive(gix::progress::Discard, &AtomicBool::new(false))
         .await
-        .map_err(git_error)?;
+        .map_err(|error| match error {
+            gix::remote::fetch::Error::NoMapping { .. } => Error::MissingRemoteRef {
+                name: source_ref.clone(),
+            },
+            gix::remote::fetch::Error::IncompatibleObjectHash { local, remote } => {
+                Error::IncompatibleObjectFormat {
+                    local: format!("{local:?}").to_ascii_lowercase(),
+                    remote: format!("{remote:?}").to_ascii_lowercase(),
+                }
+            }
+            error => git_error(error),
+        })?;
 
     let reopened = gix::open(repository.git_dir()).map_err(git_error)?;
     let tip = reopened
@@ -338,6 +354,61 @@ pub fn reference_oid(
         .to_string())
 }
 
+pub fn validate_repository_contract(repository_path: impl AsRef<Path>) -> Result<(), Error> {
+    validate_configured_object_format(repository_path.as_ref())?;
+    let repository = gix::open(repository_path.as_ref()).map_err(git_error)?;
+    validate_open_repository_contract(&repository)
+}
+
+fn validate_configured_object_format(repository_path: &Path) -> Result<(), Error> {
+    let worktree_config = repository_path.join(".git/config");
+    let bare_config = repository_path.join("config");
+    let config = if worktree_config.is_file() {
+        worktree_config
+    } else if repository_path.join("HEAD").is_file() && bare_config.is_file() {
+        bare_config
+    } else {
+        return Ok(());
+    };
+    let text = fs::read_to_string(&config).map_err(|source| Error::Io {
+        path: config,
+        source,
+    })?;
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("objectformat")
+            && !value.trim().eq_ignore_ascii_case("sha1")
+        {
+            return Err(Error::UnsupportedObjectFormat {
+                actual: value.trim().to_ascii_lowercase(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_open_repository_contract(repository: &gix::Repository) -> Result<(), Error> {
+    validate_object_format(repository)?;
+    let reference_name = "refs/heads/main";
+    repository
+        .find_reference(reference_name)
+        .map_err(|_| Error::MissingLocalRef {
+            name: reference_name.to_owned(),
+        })?;
+    Ok(())
+}
+
+fn validate_object_format(repository: &gix::Repository) -> Result<(), Error> {
+    if repository.object_hash() != gix::hash::Kind::Sha1 {
+        return Err(Error::UnsupportedObjectFormat {
+            actual: format!("{:?}", repository.object_hash()).to_ascii_lowercase(),
+        });
+    }
+    Ok(())
+}
+
 pub fn is_ancestor(
     repository_path: impl AsRef<Path>,
     ancestor: &str,
@@ -526,13 +597,13 @@ fn git_error(error: impl std::fmt::Display + std::fmt::Debug) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, process::Command};
 
     use gix::{bstr::ByteSlice, objs::tree::EntryKind};
 
     use super::{
         changed_paths, export_remote_snapshot, finalize_fast_forward_checkout, is_ancestor,
-        validate_branch, worktree_changed_paths,
+        validate_branch, validate_repository_contract, worktree_changed_paths,
     };
 
     #[test]
@@ -638,6 +709,32 @@ mod tests {
 
         assert!(is_ancestor(repository.path(), &base.to_string(), &child.to_string()).unwrap());
         assert!(!is_ancestor(repository.path(), &child.to_string(), &sibling.to_string()).unwrap());
+    }
+
+    #[test]
+    fn rejects_missing_main_and_sha256_repositories() {
+        let temporary = tempfile::tempdir().unwrap();
+        let missing_main = temporary.path().join("missing-main");
+        gix::init(&missing_main).unwrap();
+        assert!(matches!(
+            validate_repository_contract(&missing_main),
+            Err(crate::Error::MissingLocalRef { .. })
+        ));
+
+        let sha256 = temporary.path().join("sha256");
+        let status = Command::new("git")
+            .args(["init", "--quiet", "--object-format=sha256"])
+            .arg(&sha256)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "native Git must support the SHA-256 fixture"
+        );
+        assert!(matches!(
+            validate_repository_contract(&sha256),
+            Err(crate::Error::UnsupportedObjectFormat { .. })
+        ));
     }
 
     #[test]

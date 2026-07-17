@@ -13,6 +13,7 @@ use thiserror::Error;
 
 pub const SYNC_FORMAT: &str = "plainfeed.sync/v1";
 pub const CONFLICT_FORMAT: &str = "plainfeed.conflict/v1";
+pub const PENDING_PUSH_FORMAT: &str = "plainfeed.pending-push/v1";
 
 static MARKER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -426,6 +427,65 @@ pub struct SyncState {
     pub last_error: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PendingPush {
+    pub format: String,
+    pub previous_remote: String,
+    pub pushed_commit: String,
+    pub state_tree: String,
+    pub dirty_markers: Vec<String>,
+    pub pushed_at: String,
+    pub remote_url: String,
+}
+
+impl PendingPush {
+    pub fn new(
+        previous_remote: impl Into<String>,
+        pushed_commit: impl Into<String>,
+        state_tree: impl Into<String>,
+        dirty_markers: Vec<String>,
+        pushed_at: impl Into<String>,
+        remote_url: impl Into<String>,
+    ) -> Self {
+        Self {
+            format: PENDING_PUSH_FORMAT.to_owned(),
+            previous_remote: previous_remote.into(),
+            pushed_commit: pushed_commit.into(),
+            state_tree: state_tree.into(),
+            dirty_markers,
+            pushed_at: pushed_at.into(),
+            remote_url: remote_url.into(),
+        }
+    }
+
+    pub fn write_to(&self, repository_root: impl AsRef<Path>) -> Result<(), Error> {
+        write_metadata(repository_root.as_ref(), "pending-push.toml", self)
+    }
+
+    pub fn read_from(repository_root: impl AsRef<Path>) -> Result<Option<Self>, Error> {
+        let path = repository_root
+            .as_ref()
+            .join(".plainfeed/pending-push.toml");
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(Error::Io { path, source }),
+        };
+        let pending: Self =
+            toml::from_str(&text).map_err(|source| Error::ParseToml { path, source })?;
+        if pending.format != PENDING_PUSH_FORMAT {
+            return Err(Error::UnsupportedMetadataFormat {
+                format: pending.format,
+            });
+        }
+        Ok(Some(pending))
+    }
+
+    pub fn clear(repository_root: impl AsRef<Path>) -> Result<(), Error> {
+        remove_metadata(repository_root.as_ref(), "pending-push.toml")
+    }
+}
+
 impl SyncState {
     pub fn new(remote: impl Into<String>, branch: impl Into<String>) -> Self {
         Self {
@@ -511,12 +571,16 @@ impl ConflictReport {
     }
 
     pub fn clear(repository_root: impl AsRef<Path>) -> Result<(), Error> {
-        let path = repository_root.as_ref().join(".plainfeed/conflict.toml");
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(Error::Io { path, source }),
-        }
+        remove_metadata(repository_root.as_ref(), "conflict.toml")
+    }
+}
+
+fn remove_metadata(repository_root: &Path, file_name: &str) -> Result<(), Error> {
+    let path = repository_root.join(".plainfeed").join(file_name);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(Error::Io { path, source }),
     }
 }
 
@@ -565,8 +629,8 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        AuditError, CONFLICT_FORMAT, ConflictReport, DirtyJournal, PathOwner, SyncState,
-        UpdateLock, activate_staged_snapshot, activate_staged_snapshot_with_finalize,
+        AuditError, CONFLICT_FORMAT, ConflictReport, DirtyJournal, PathOwner, PendingPush,
+        SyncState, UpdateLock, activate_staged_snapshot, activate_staged_snapshot_with_finalize,
         audit_plainfeed_changes, audit_remote_changes, path_owner,
     };
 
@@ -715,6 +779,26 @@ mod tests {
         state.write_to(temporary.path()).unwrap();
 
         assert_eq!(SyncState::read_from(temporary.path()).unwrap(), Some(state));
+    }
+
+    #[test]
+    fn pending_push_round_trips_for_crash_recovery() {
+        let temporary = tempfile::tempdir().unwrap();
+        let pending = PendingPush::new(
+            "aaa",
+            "bbb",
+            "ccc",
+            vec!["marker-a.toml".to_owned()],
+            "2026-07-17T06:00:00Z",
+            "https://example.com/repository.git",
+        );
+        pending.write_to(temporary.path()).unwrap();
+        assert_eq!(
+            PendingPush::read_from(temporary.path()).unwrap(),
+            Some(pending)
+        );
+        PendingPush::clear(temporary.path()).unwrap();
+        assert_eq!(PendingPush::read_from(temporary.path()).unwrap(), None);
     }
 
     #[test]

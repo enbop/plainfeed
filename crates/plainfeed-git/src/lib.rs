@@ -14,7 +14,8 @@ mod state_commit;
 
 pub use fetch::{
     FetchOutcome, FetchRequest, changed_paths, commit_root_entry_oid, export_remote_snapshot,
-    fetch, finalize_fast_forward_checkout, is_ancestor, reference_oid, worktree_changed_paths,
+    fetch, finalize_fast_forward_checkout, is_ancestor, reference_oid,
+    validate_repository_contract, worktree_changed_paths,
 };
 pub use push::{PushOutcome, push_one_commit};
 pub use state_commit::{StateCommit, create_state_commit};
@@ -166,6 +167,26 @@ pub enum Error {
     StaleRemote { parent: String, remote: String },
     #[error("generated push pack uses {bytes} bytes, over the {limit}-byte limit")]
     PushTooLarge { bytes: usize, limit: usize },
+    #[error("remote does not advertise required ref {name}")]
+    MissingRemoteRef { name: String },
+    #[error("local repository does not contain required ref {name}")]
+    MissingLocalRef { name: String },
+    #[error("unsupported repository object format {actual}; Plainfeed v1 requires sha1")]
+    UnsupportedObjectFormat { actual: String },
+    #[error("remote object format {remote} is incompatible with local format {local}")]
+    IncompatibleObjectFormat { local: String, remote: String },
+}
+
+impl Error {
+    pub fn is_repository_contract_violation(&self) -> bool {
+        matches!(
+            self,
+            Self::MissingRemoteRef { .. }
+                | Self::MissingLocalRef { .. }
+                | Self::UnsupportedObjectFormat { .. }
+                | Self::IncompatibleObjectFormat { .. }
+        )
+    }
 }
 
 fn directory_bytes(path: &Path) -> Result<u64, Error> {

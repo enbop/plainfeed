@@ -122,6 +122,28 @@ case "$RECOVERED" in
 esac
 test ! -f "$REPOSITORY/.plainfeed/conflict.toml"
 
+mkdir -p "$REPOSITORY/.plainfeed/backup/activation-interrupted"
+mkdir -p "$REPOSITORY/.plainfeed/update.lock"
+mv "$REPOSITORY/content" \
+  "$REPOSITORY/.plainfeed/backup/activation-interrupted/content"
+mv "$REPOSITORY/config" \
+  "$REPOSITORY/.plainfeed/backup/activation-interrupted/config"
+mkdir -p "$REPOSITORY/content"
+RECOVERY_SOURCE=$(find \
+  "$REPOSITORY/.plainfeed/backup/activation-interrupted/content" \
+  -type f -name '*.md' | head -n 1)
+cp "$RECOVERY_SOURCE" "$REPOSITORY/content/partial.md"
+LOCAL_RECOVERY=$(wasmtime run \
+  --dir "$REPOSITORY::/data" \
+  "$WASM" recover-local)
+case "$LOCAL_RECOVERY" in
+  *"local_recovery=completed"*) ;;
+  *) echo "interrupted activation recovery did not complete" >&2; exit 1 ;;
+esac
+test ! -d "$REPOSITORY/.plainfeed/update.lock"
+git -C "$REPOSITORY" diff --quiet
+git -C "$REPOSITORY" diff --cached --quiet
+
 git -C "$REPOSITORY" fsck --full >/dev/null
 
-echo "Plainfeed scheduling, offline recovery, and conflict status passed under Wasmtime"
+echo "Plainfeed scheduling, conflicts, and local recovery passed under Wasmtime"

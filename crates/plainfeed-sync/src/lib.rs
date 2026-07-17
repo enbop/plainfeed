@@ -4,7 +4,7 @@ use std::{fs, path::PathBuf};
 
 use plainfeed_core::Store;
 use plainfeed_sync_core::{
-    ConflictReport, DirtyJournal, SyncState, activate_staged_snapshot_with_finalize,
+    ConflictReport, DirtyJournal, PendingPush, SyncState, activate_staged_snapshot_with_finalize,
     audit_plainfeed_changes, audit_remote_changes,
 };
 use thiserror::Error;
@@ -50,6 +50,93 @@ pub enum PublishOutcome {
     NoDirtyState,
     AlreadyPublished,
     Pushed(plainfeed_git::PushOutcome),
+}
+
+pub fn recover_local_transition(repository_root: impl Into<PathBuf>) -> Result<bool, Error> {
+    let repository_root = repository_root.into();
+    let lock = repository_root.join(".plainfeed/update.lock");
+    if !lock.is_dir() {
+        return Ok(false);
+    }
+    let local_tip = plainfeed_git::reference_oid(&repository_root, "refs/heads/main")?;
+    let changed = plainfeed_git::worktree_changed_paths(
+        &repository_root,
+        &local_tip,
+        &["content", "config"],
+    )?;
+    let backup_root = repository_root.join(".plainfeed/backup");
+    if !changed.is_empty() {
+        let mut backups = match fs::read_dir(&backup_root) {
+            Ok(entries) => entries.collect::<Result<Vec<_>, _>>().map_err(|source| {
+                plainfeed_sync_core::Error::Io {
+                    path: backup_root.clone(),
+                    source,
+                }
+            })?,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(source) => {
+                return Err(plainfeed_sync_core::Error::Io {
+                    path: backup_root,
+                    source,
+                }
+                .into());
+            }
+        };
+        backups.sort_by_key(|entry| entry.file_name());
+        let backup = backups.last().map(|entry| entry.path()).ok_or_else(|| {
+            plainfeed_sync_core::Error::Validation(
+                "interrupted activation has no rollback backup".to_owned(),
+            )
+        })?;
+        for area in ["content", "config"] {
+            let previous = backup.join(area);
+            if !previous.exists() {
+                continue;
+            }
+            let live = repository_root.join(area);
+            match fs::remove_dir_all(&live) {
+                Ok(()) => {}
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(plainfeed_sync_core::Error::Io { path: live, source }.into());
+                }
+            }
+            fs::rename(&previous, &live)
+                .map_err(|source| plainfeed_sync_core::Error::Io { path: live, source })?;
+        }
+        Store::open(&repository_root).validate()?;
+        let remaining = plainfeed_git::worktree_changed_paths(
+            &repository_root,
+            &local_tip,
+            &["content", "config"],
+        )?;
+        if !remaining.is_empty() {
+            return Err(Error::LocalOwnership { paths: remaining });
+        }
+    }
+
+    let mut state = SyncState::read_from(&repository_root)?
+        .unwrap_or_else(|| SyncState::new("origin", "refs/heads/main"));
+    state.last_remote_oid = Some(local_tip.clone());
+    state.last_state_tree_oid =
+        plainfeed_git::commit_root_entry_oid(&repository_root, &local_tip, "state")?;
+    state.last_error = None;
+    state.write_to(&repository_root)?;
+
+    match fs::remove_dir_all(&backup_root) {
+        Ok(()) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(plainfeed_sync_core::Error::Io {
+                path: backup_root,
+                source,
+            }
+            .into());
+        }
+    }
+    fs::remove_dir(&lock)
+        .map_err(|source| plainfeed_sync_core::Error::Io { path: lock, source })?;
+    Ok(true)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,6 +196,7 @@ pub async fn run_pull_cycle(
 ) -> Result<bool, Error> {
     let repository_root = repository_root.into();
     ensure_no_active_conflict(&repository_root)?;
+    preflight_repository_contract(&repository_root, now)?;
     let mut state = SyncState::read_from(&repository_root)?
         .unwrap_or_else(|| SyncState::new("origin", "refs/heads/main"));
     if !pull_is_due(command, state.last_pull_at.as_deref(), now) {
@@ -117,11 +205,12 @@ pub async fn run_pull_cycle(
 
     let local_tip = plainfeed_git::reference_oid(&repository_root, "refs/heads/main")?;
     preflight_local_ownership(&repository_root, &local_tip, now)?;
-    let trusted_state_tree = match state.last_state_tree_oid.clone() {
-        Some(tree) => tree,
-        None => plainfeed_git::commit_root_entry_oid(&repository_root, &local_tip, "state")?
-            .ok_or(Error::MissingStateTree)?,
-    };
+    let trusted_state_tree = trusted_state_tree(
+        &repository_root,
+        &local_tip,
+        state.last_state_tree_oid.as_deref(),
+        now,
+    )?;
     let successful_remote_url = remote.url().to_owned();
     let fetched =
         match plainfeed_git::fetch(plainfeed_git::FetchRequest::main(&repository_root, remote))
@@ -131,6 +220,16 @@ pub async fn run_pull_cycle(
             Err(error) => {
                 state.last_error = Some(error.to_string());
                 let _ = state.write_to(&repository_root);
+                if error.is_repository_contract_violation() {
+                    write_conflict_report(
+                        &repository_root,
+                        error.to_string(),
+                        Vec::new(),
+                        Some(local_tip.clone()),
+                        None,
+                        now,
+                    )?;
+                }
                 return Err(error.into());
             }
         };
@@ -165,10 +264,16 @@ pub async fn publish_state(
 ) -> Result<PublishOutcome, Error> {
     let repository_root = repository_root.into();
     ensure_no_active_conflict(&repository_root)?;
+    preflight_repository_contract(&repository_root, now)?;
+    let recovered_push = recover_pending_push(&repository_root, remote.clone(), now).await?;
     let journal = DirtyJournal::new(&repository_root);
     let dirty_snapshot = journal.snapshot()?;
     if dirty_snapshot.is_empty() {
-        return Ok(PublishOutcome::NoDirtyState);
+        return Ok(if recovered_push {
+            PublishOutcome::AlreadyPublished
+        } else {
+            PublishOutcome::NoDirtyState
+        });
     }
     if let Err(error) = Store::open(&repository_root).validate_state() {
         write_conflict_report(
@@ -192,16 +297,33 @@ pub async fn publish_state(
     for attempt in 0..3 {
         let local_tip = plainfeed_git::reference_oid(&repository_root, "refs/heads/main")?;
         preflight_local_ownership(&repository_root, &local_tip, now)?;
-        let trusted_state_tree = match state.last_state_tree_oid.clone() {
-            Some(tree) => tree,
-            None => plainfeed_git::commit_root_entry_oid(&repository_root, &local_tip, "state")?
-                .ok_or(Error::MissingStateTree)?,
-        };
-        let fetched = plainfeed_git::fetch(plainfeed_git::FetchRequest::main(
+        let trusted_state_tree = trusted_state_tree(
+            &repository_root,
+            &local_tip,
+            state.last_state_tree_oid.as_deref(),
+            now,
+        )?;
+        let fetched = match plainfeed_git::fetch(plainfeed_git::FetchRequest::main(
             &repository_root,
             remote.clone(),
         ))
-        .await?;
+        .await
+        {
+            Ok(fetched) => fetched,
+            Err(error) => {
+                if error.is_repository_contract_violation() {
+                    write_conflict_report(
+                        &repository_root,
+                        error.to_string(),
+                        Vec::new(),
+                        Some(local_tip.clone()),
+                        None,
+                        now,
+                    )?;
+                }
+                return Err(error.into());
+            }
+        };
         preflight_remote_history(&repository_root, &local_tip, &fetched.remote_tip, now)?;
         let base = state
             .last_remote_oid
@@ -260,6 +382,15 @@ pub async fn publish_state(
             return Ok(PublishOutcome::AlreadyPublished);
         };
         audit_plainfeed_changes(candidate.changed_paths.iter().map(String::as_str))?;
+        let pending = PendingPush::new(
+            &fetched.remote_tip,
+            &candidate.commit,
+            &candidate.state_tree,
+            dirty_snapshot.clone(),
+            &timestamp,
+            &remote_url,
+        );
+        pending.write_to(&repository_root)?;
         match plainfeed_git::push_one_commit(
             remote.clone(),
             &repository_root,
@@ -270,6 +401,12 @@ pub async fn publish_state(
         .await
         {
             Ok(outcome) => {
+                plainfeed_git::finalize_fast_forward_checkout(
+                    &repository_root,
+                    "main",
+                    Some(&fetched.remote_tip),
+                    &candidate.commit,
+                )?;
                 state.remote_url = Some(remote_url.clone());
                 finalize_publication_state(
                     &repository_root,
@@ -278,16 +415,12 @@ pub async fn publish_state(
                     Some(candidate.state_tree),
                     &timestamp,
                 )?;
-                plainfeed_git::finalize_fast_forward_checkout(
-                    &repository_root,
-                    "main",
-                    Some(&fetched.remote_tip),
-                    &candidate.commit,
-                )?;
                 journal.clear_snapshot(&dirty_snapshot)?;
+                PendingPush::clear(&repository_root)?;
                 return Ok(PublishOutcome::Pushed(outcome));
             }
             Err(plainfeed_git::Error::StaleRemote { parent, remote }) => {
+                PendingPush::clear(&repository_root)?;
                 last_stale_remote = Some((parent, remote));
                 continue;
             }
@@ -308,6 +441,86 @@ pub async fn publish_state(
     Err(Error::PushRetryExhausted)
 }
 
+async fn recover_pending_push(
+    repository_root: &std::path::Path,
+    remote: plainfeed_git::Remote,
+    now: OffsetDateTime,
+) -> Result<bool, Error> {
+    let Some(pending) = PendingPush::read_from(repository_root)? else {
+        return Ok(false);
+    };
+    if pending.remote_url != remote.url() {
+        write_conflict_report(
+            repository_root,
+            "pending state push belongs to a different remote URL",
+            Vec::new(),
+            Some(pending.previous_remote),
+            None,
+            now,
+        )?;
+        return Err(Error::ConflictActive {
+            reason: "pending state push belongs to a different remote URL".to_owned(),
+        });
+    }
+    let fetched =
+        plainfeed_git::fetch(plainfeed_git::FetchRequest::main(repository_root, remote)).await?;
+    if fetched.remote_tip == pending.previous_remote {
+        PendingPush::clear(repository_root)?;
+        return Ok(false);
+    }
+    if !plainfeed_git::is_ancestor(repository_root, &pending.pushed_commit, &fetched.remote_tip)?
+        || fetched.state_tree.as_deref() != Some(pending.state_tree.as_str())
+    {
+        write_conflict_report(
+            repository_root,
+            "remote history cannot confirm the pending state push",
+            Vec::new(),
+            Some(pending.previous_remote),
+            Some(fetched.remote_tip),
+            now,
+        )?;
+        return Err(Error::ConflictActive {
+            reason: "remote history cannot confirm the pending state push".to_owned(),
+        });
+    }
+
+    let local_tip = plainfeed_git::reference_oid(repository_root, "refs/heads/main")?;
+    if local_tip == pending.previous_remote {
+        plainfeed_git::finalize_fast_forward_checkout(
+            repository_root,
+            "main",
+            Some(&pending.previous_remote),
+            &pending.pushed_commit,
+        )?;
+    } else if local_tip != pending.pushed_commit {
+        write_conflict_report(
+            repository_root,
+            "local history cannot finalize the pending state push",
+            Vec::new(),
+            Some(local_tip),
+            Some(fetched.remote_tip),
+            now,
+        )?;
+        return Err(Error::ConflictActive {
+            reason: "local history cannot finalize the pending state push".to_owned(),
+        });
+    }
+
+    let mut state = SyncState::read_from(repository_root)?
+        .unwrap_or_else(|| SyncState::new("origin", "refs/heads/main"));
+    state.remote_url = Some(pending.remote_url.clone());
+    finalize_publication_state(
+        repository_root,
+        &mut state,
+        &pending.pushed_commit,
+        Some(pending.state_tree),
+        &pending.pushed_at,
+    )?;
+    DirtyJournal::new(repository_root).clear_snapshot(&pending.dirty_markers)?;
+    PendingPush::clear(repository_root)?;
+    Ok(true)
+}
+
 fn ensure_no_active_conflict(repository_root: &std::path::Path) -> Result<(), Error> {
     if let Some(report) = ConflictReport::read_from(repository_root)? {
         return Err(Error::ConflictActive {
@@ -315,6 +528,63 @@ fn ensure_no_active_conflict(repository_root: &std::path::Path) -> Result<(), Er
         });
     }
     Ok(())
+}
+
+fn preflight_repository_contract(
+    repository_root: &std::path::Path,
+    now: OffsetDateTime,
+) -> Result<(), Error> {
+    if let Err(error) = plainfeed_git::validate_repository_contract(repository_root) {
+        write_conflict_report(
+            repository_root,
+            error.to_string(),
+            Vec::new(),
+            None,
+            None,
+            now,
+        )?;
+        return Err(Error::Git(error));
+    }
+    Ok(())
+}
+
+fn trusted_state_tree(
+    repository_root: &std::path::Path,
+    local_tip: &str,
+    recorded_tree: Option<&str>,
+    now: OffsetDateTime,
+) -> Result<String, Error> {
+    let committed_tree = plainfeed_git::commit_root_entry_oid(repository_root, local_tip, "state")?;
+    let Some(committed_tree) = committed_tree else {
+        write_conflict_report(
+            repository_root,
+            "canonical local commit has no state tree",
+            vec!["state".to_owned()],
+            Some(local_tip.to_owned()),
+            None,
+            now,
+        )?;
+        return Err(Error::MissingStateTree);
+    };
+    if let Some(recorded_tree) = recorded_tree
+        && recorded_tree != committed_tree
+    {
+        write_conflict_report(
+            repository_root,
+            "canonical local state tree differs from the recorded trusted tree",
+            vec!["state".to_owned()],
+            Some(local_tip.to_owned()),
+            None,
+            now,
+        )?;
+        return Err(Error::Audit(
+            plainfeed_sync_core::AuditError::RemoteStateChanged {
+                remote: Some(committed_tree),
+                trusted: Some(recorded_tree.to_owned()),
+            },
+        ));
+    }
+    Ok(recorded_tree.unwrap_or(&committed_tree).to_owned())
 }
 
 fn preflight_remote_history(
@@ -407,8 +677,18 @@ pub fn activate_fetched_snapshot(request: ActivationRequest) -> Result<Activatio
         &request.repository_root,
         &request.remote_tip,
         "state",
-    )?
-    .ok_or(Error::MissingStateTree)?;
+    )?;
+    let Some(remote_state_tree) = remote_state_tree else {
+        write_conflict_report(
+            &request.repository_root,
+            "remote commit has no state tree",
+            changed_paths.clone(),
+            Some(request.expected_base.clone()),
+            Some(request.remote_tip.clone()),
+            OffsetDateTime::now_utc(),
+        )?;
+        return Err(Error::MissingStateTree);
+    };
     if let Err(error) = audit_remote_changes(
         changed_paths.iter().map(String::as_str),
         Some(&remote_state_tree),
@@ -503,8 +783,10 @@ mod tests {
     use gix::{bstr::ByteSlice, objs::tree::EntryKind};
 
     use super::{
-        ActivationRequest, SyncCommand, activate_fetched_snapshot, ensure_no_active_conflict,
-        preflight_local_ownership, preflight_remote_history, pull_is_due, state_publication_is_due,
+        ActivationRequest, SyncCommand, SyncState, activate_fetched_snapshot,
+        ensure_no_active_conflict, preflight_local_ownership, preflight_remote_history,
+        preflight_repository_contract, pull_is_due, recover_local_transition,
+        state_publication_is_due,
     };
 
     const OLD_ENTRY: &str = r#"+++
@@ -618,6 +900,24 @@ favorite = true
     }
 
     #[test]
+    fn an_invalid_local_repository_shape_is_reported() {
+        let temporary = tempfile::tempdir().unwrap();
+        gix::init(temporary.path()).unwrap();
+
+        assert!(
+            preflight_repository_contract(
+                temporary.path(),
+                time::OffsetDateTime::from_unix_timestamp(1_784_160_000).unwrap(),
+            )
+            .is_err()
+        );
+        let report = plainfeed_sync_core::ConflictReport::read_from(temporary.path())
+            .unwrap()
+            .unwrap();
+        assert!(report.reason.contains("refs/heads/main"));
+    }
+
+    #[test]
     fn divergent_history_pauses_before_activation() {
         let temporary = tempfile::tempdir().unwrap();
         let repository = gix::init(temporary.path().join("data")).unwrap();
@@ -722,6 +1022,68 @@ favorite = true
             .unwrap();
         assert_eq!(report.paths, ["content/item.md"]);
         assert_eq!(report.local_base, Some(commit.to_string()));
+    }
+
+    #[test]
+    fn explicit_local_recovery_rolls_back_an_interrupted_activation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("data");
+        let repository = gix::init(&root).unwrap();
+        let content = repository.write_blob(OLD_ENTRY.as_bytes()).unwrap();
+        let config = repository.write_blob(CHANNELS.as_bytes()).unwrap();
+        let mut editor = repository.edit_tree(repository.empty_tree().id).unwrap();
+        editor
+            .upsert("content/old-entry.md", EntryKind::Blob, content)
+            .unwrap();
+        editor
+            .upsert("config/channels.toml", EntryKind::Blob, config)
+            .unwrap();
+        let tree = editor.write().unwrap();
+        let identity = gix::actor::SignatureRef {
+            name: b"Plainfeed Test".as_bstr(),
+            email: b"test@plainfeed.invalid".as_bstr(),
+            time: "1784160000 +0900",
+        };
+        let commit = repository
+            .commit_as(
+                identity,
+                identity,
+                "refs/heads/main",
+                "fixture",
+                tree,
+                gix::commit::NO_PARENT_IDS,
+            )
+            .unwrap();
+        fs::create_dir_all(root.join("content")).unwrap();
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(root.join("content/old-entry.md"), OLD_ENTRY).unwrap();
+        fs::write(root.join("config/channels.toml"), CHANNELS).unwrap();
+        let backup = root.join(".plainfeed/backup/activation-test");
+        fs::create_dir_all(&backup).unwrap();
+        fs::create_dir_all(root.join(".plainfeed/update.lock")).unwrap();
+        fs::rename(root.join("content"), backup.join("content")).unwrap();
+        fs::rename(root.join("config"), backup.join("config")).unwrap();
+        fs::create_dir_all(root.join("content")).unwrap();
+        fs::write(root.join("content/partial.md"), "partial activation").unwrap();
+
+        assert!(recover_local_transition(&root).unwrap());
+        assert_eq!(
+            fs::read_to_string(root.join("content/old-entry.md")).unwrap(),
+            OLD_ENTRY
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("config/channels.toml")).unwrap(),
+            CHANNELS
+        );
+        assert!(!root.join(".plainfeed/update.lock").exists());
+        assert!(!root.join(".plainfeed/backup").exists());
+        assert_eq!(
+            SyncState::read_from(&root)
+                .unwrap()
+                .unwrap()
+                .last_remote_oid,
+            Some(commit.to_string())
+        );
     }
 
     #[test]

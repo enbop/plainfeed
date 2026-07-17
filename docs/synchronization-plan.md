@@ -51,7 +51,15 @@ External writers must follow the [producer contract](producer-contract.md).
   last valid snapshot. Unit and Wasmtime fixtures cover local ownership,
   invalid content, remote state changes, divergent history, three exhausted
   publication races, explicit acknowledgement, and repaired recovery.
-- Phase 7 is the next implementation step.
+- Phase 7: a versioned pending-push journal makes unknown receive-pack outcomes
+  recoverable; captured dirty markers remain race-safe under concurrent reader
+  writes. `recover-local` restores or finalizes interrupted activation state,
+  status/log fields are bounded, the reader has a compact sync indicator, and
+  repository shape/object format checks fail closed. Wasmtime fixtures cover
+  lost HTTP responses, delayed push concurrency, interrupted activation,
+  offline recovery, CAS exhaustion, and native `git fsck --full` validation.
+  The operational and native Git fallback procedures are documented in
+  [operations.md](operations.md).
 
 ## Runtime topology
 

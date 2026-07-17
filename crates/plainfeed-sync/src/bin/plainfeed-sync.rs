@@ -2,9 +2,10 @@ use std::{env, error::Error, path::PathBuf};
 
 use plainfeed_git::{Credentials, Remote};
 use plainfeed_sync::{
-    PublishOutcome, SyncCommand, publish_state, run_pull_cycle, state_publication_is_due,
+    PublishOutcome, SyncCommand, publish_state, recover_local_transition, run_pull_cycle,
+    state_publication_is_due,
 };
-use plainfeed_sync_core::{ConflictReport, DirtyJournal, SyncState};
+use plainfeed_sync_core::{ConflictReport, DirtyJournal, PendingPush, SyncState};
 use time::OffsetDateTime;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -25,6 +26,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             ConflictReport::clear(&repository_root)?;
             println!("conflict=acknowledged");
+            return Ok(());
+        }
+        Some("recover-local") => {
+            let repository_root =
+                PathBuf::from(arguments.next().unwrap_or_else(|| "/data".to_owned()));
+            if arguments.next().is_some() {
+                return Err(usage().into());
+            }
+            println!(
+                "local_recovery={}",
+                if recover_local_transition(repository_root)? {
+                    "completed"
+                } else {
+                    "not-needed"
+                }
+            );
             return Ok(());
         }
         _ => return Err(usage().into()),
@@ -78,7 +95,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn usage() -> &'static str {
-    "usage: plainfeed-sync <tick|force|status|acknowledge-conflict> [DATA_ROOT]"
+    "usage: plainfeed-sync <tick|force|status|acknowledge-conflict|recover-local> [DATA_ROOT]"
 }
 
 fn persist_error(repository_root: &PathBuf, error: &str) {
@@ -87,13 +104,14 @@ fn persist_error(repository_root: &PathBuf, error: &str) {
         Ok(None) => SyncState::new("origin", "refs/heads/main"),
         Err(_) => return,
     };
-    state.last_error = Some(error.to_owned());
+    state.last_error = Some(error.chars().take(4096).collect());
     let _ = state.write_to(repository_root);
 }
 
 fn status_value(value: &str) -> String {
     value
         .chars()
+        .take(4096)
         .map(|character| match character {
             '\n' | '\r' | '\0' => ' ',
             _ => character,
@@ -161,5 +179,9 @@ fn print_status(repository_root: &PathBuf) -> Result<(), Box<dyn Error>> {
         DirtyJournal::new(repository_root).snapshot()?.len()
     );
     print_conflict_status(repository_root)?;
+    println!(
+        "pending_push_active={}",
+        PendingPush::read_from(repository_root)?.is_some()
+    );
     Ok(())
 }
