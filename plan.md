@@ -90,9 +90,11 @@ progressively enhanced interface that remains useful on low-powered devices.
 
 ### Git integration
 
-Treat Git as a synchronization adapter around the file store. Begin with the
-small subset needed by the product: inspect status, read history, stage changes,
-commit, fetch, merge or rebase under a documented policy, and push.
+Treat Git as a synchronization adapter around the file store. Use one canonical
+`main` branch and directory ownership to avoid ordinary merge conflicts. The
+initial adapter fetches remote-owned content/config and publishes
+Plainfeed-owned state as one linear fast-forward commit. It deliberately does
+not implement general merge or rebase.
 
 Evaluate existing Rust Git implementations as a separate track. Do not let this
 investigation block the initial reader, which can operate on an already checked
@@ -111,6 +113,9 @@ Keep a host adapter and a GitHub Git Database API adapter as fallback paths
 until multi-commit synchronization, reconciliation, and broader failure cases
 are verified. Authenticated single-commit GitHub push is now proven under
 Wasmtime.
+
+The staged implementation and trigger policy are defined in
+`docs/synchronization-plan.md`.
 
 ## Milestones
 
@@ -156,6 +161,9 @@ comments implemented with server-rendered HTML and htmx.
 
 ### 5. Add synchronization adapters
 
+Status: architecture and phased implementation planned. The live data checkout
+and pull-only path come before state publication.
+
 - Define safe commit boundaries and conflict policies.
 - Implement or integrate the required Git subset.
 - Test local-only, generic remote, and GitHub-backed workflows.
@@ -167,12 +175,11 @@ comments implemented with server-rendered HTML and htmx.
   producers beyond the v1 syntax rules.
 - Tombstones and explicit content deletion semantics.
 - Comment edit and deletion history.
-- Git implementation and merge strategy for concurrent automated writers.
-- Whether content/state repositories are combined by default.
 
 The v1 slice resolves the other initial choices: one Markdown file with TOML
 front matter per entry, one TOML state file per entry, a WASI HTTP proxy
-component, and server-rendered HTML progressively enhanced with htmx.
+component, server-rendered HTML progressively enhanced with htmx, and one
+combined data repository with directory ownership for synchronization.
 
 ## Non-goals for the First Version
 
