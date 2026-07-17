@@ -1,7 +1,7 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
-use plainfeed_core::{Entry, Error as StoreError, Store};
-use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
+use plainfeed_core::{Channel, Entry, Error as StoreError, Store};
+use pulldown_cmark::{Event, Parser};
 use std::borrow::Cow;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -47,8 +47,10 @@ impl Response {
 
 fn route(method: &str, path_with_query: &str, body: &[u8], data_root: &Path) -> Response {
     let path = path_with_query.split('?').next().unwrap_or(path_with_query);
+    let selected_channel = query_value(path_with_query, "channel");
     match (method, path) {
-        ("GET", "/") => render_feed(data_root),
+        ("GET", "/") => render_feed(data_root, selected_channel.as_deref(), false),
+        ("GET", "/fragments/feed") => render_feed(data_root, selected_channel.as_deref(), true),
         ("GET", "/app.js") => {
             Response::static_bytes("text/javascript; charset=utf-8", APP_JS.as_bytes())
         }
@@ -126,18 +128,18 @@ fn find_entry(store: &Store, id: &str) -> Result<Entry, StoreError> {
         .ok_or_else(|| StoreError::EntryNotFound(id.to_owned()))
 }
 
-fn render_feed(data_root: &Path) -> Response {
-    match Store::open(data_root).entries() {
-        Ok(entries) => {
+fn render_feed(data_root: &Path, selected_channel: Option<&str>, fragment: bool) -> Response {
+    let store = Store::open(data_root);
+    match (store.entries(), store.channels()) {
+        (Ok(entries), Ok(channels)) => {
             let unread = entries
                 .iter()
                 .filter(|entry| entry.state.read_at.is_none())
                 .count();
-            let cards = if entries.is_empty() {
-                "<section class=\"empty\"><h2>Your feed is empty</h2><p>Add a v1 Markdown entry under <code>content/</code>.</p></section>".to_owned()
-            } else {
-                entries.iter().map(render_entry).collect::<String>()
-            };
+            let shell = render_feed_shell(&entries, &channels, selected_channel);
+            if fragment {
+                return Response::text(200, "text/html; charset=utf-8", shell);
+            }
             let document = format!(
                 r#"<!doctype html>
 <html lang="en">
@@ -155,17 +157,92 @@ fn render_feed(data_root: &Path) -> Response {
     <a class="brand" href="/" aria-label="Plainfeed home">Plainfeed</a>
     <p><strong>{}</strong> unread · <strong>{}</strong> total</p>
   </header>
-  <main id="feed" class="feed">{}</main>
+  {}
 </body>
 </html>"#,
                 unread,
                 entries.len(),
-                cards
+                shell
             );
             Response::text(200, "text/html; charset=utf-8", document)
         }
-        Err(error) => server_error(error),
+        (Err(error), _) | (_, Err(error)) => server_error(error),
     }
+}
+
+fn render_feed_shell(
+    entries: &[Entry],
+    channels: &[Channel],
+    selected_channel: Option<&str>,
+) -> String {
+    let mut navigation = channel_link("All", None, selected_channel, entries.len());
+    for channel in channels {
+        let count = entries
+            .iter()
+            .filter(|entry| entry.metadata.channels.contains(&channel.id))
+            .count();
+        navigation.push_str(&channel_link(
+            &channel.label,
+            Some(&channel.id),
+            selected_channel,
+            count,
+        ));
+    }
+
+    let visible = entries
+        .iter()
+        .filter(|entry| {
+            selected_channel
+                .map(|channel| entry.metadata.channels.iter().any(|id| id == channel))
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    let cards = if visible.is_empty() {
+        let message = if selected_channel.is_some() {
+            "No entries in this channel."
+        } else {
+            "Your feed is empty. Add a v1 Markdown entry under <code>content/</code>."
+        };
+        format!("<section class=\"empty\"><h2>Nothing here yet</h2><p>{message}</p></section>")
+    } else {
+        visible.into_iter().map(render_entry).collect::<String>()
+    };
+
+    format!(
+        r#"<section id="feed-shell" class="feed-shell">
+  <nav class="channel-tabs" aria-label="Feed channels">{navigation}</nav>
+  <main id="feed" class="feed">{cards}</main>
+</section>"#
+    )
+}
+
+fn channel_link(
+    label: &str,
+    channel: Option<&str>,
+    selected_channel: Option<&str>,
+    count: usize,
+) -> String {
+    let selected = channel == selected_channel;
+    let page_url = channel
+        .map(|id| format!("/?channel={id}"))
+        .unwrap_or_else(|| "/".to_owned());
+    let fragment_url = channel
+        .map(|id| format!("/fragments/feed?channel={id}"))
+        .unwrap_or_else(|| "/fragments/feed".to_owned());
+    format!(
+        "<a class=\"channel-tab{}\" href=\"{}\" hx-get=\"{}\" hx-target=\"#feed-shell\" hx-swap=\"outerHTML\" hx-push-url=\"{}\"{}>{}<span>{}</span></a>",
+        if selected { " is-active" } else { "" },
+        escape_html(&page_url),
+        escape_html(&fragment_url),
+        escape_html(&page_url),
+        if selected {
+            " aria-current=\"page\""
+        } else {
+            ""
+        },
+        escape_html(label),
+        count
+    )
 }
 
 fn render_entry(entry: &Entry) -> String {
@@ -187,8 +264,8 @@ fn render_entry(entry: &Entry) -> String {
     let summary = metadata
         .summary
         .as_ref()
-        .map(|summary| format!("<p class=\"summary\">{}</p>", escape_html(summary)))
-        .unwrap_or_default();
+        .cloned()
+        .unwrap_or_else(|| plain_text_summary(&entry.body, 280));
     let comments = if state.comments.is_empty() {
         "<p class=\"no-comments\">No comments yet.</p>".to_owned()
     } else {
@@ -207,13 +284,13 @@ fn render_entry(entry: &Entry) -> String {
     format!(
         r#"<article id="entry-{id}" class="entry-card{unread_class}" data-entry-id="{id}" data-unread="{unread}">
   <header class="entry-header">
-    <div class="entry-meta"><span class="unread-dot" aria-label="Unread"></span><time datetime="{published}">{published}</time><span>·</span><a href="{source_url}" rel="noreferrer">{source_name}</a></div>
-    <h2>{title}</h2>
-    {summary}
+    <div class="entry-meta"><span class="unread-dot" aria-label="Unread"></span><time datetime="{published}">{published}</time><span>·</span><span>{source_name}</span></div>
+    <h2><a href="{source_url}" rel="noreferrer">{title}</a></h2>
+    <p class="summary">{summary}</p>
     <div class="tags">{tags}</div>
   </header>
-  <div class="entry-body">{body}</div>
   <footer class="entry-actions">
+    <a class="read-original" href="{source_url}" rel="noreferrer">Read original <span aria-hidden="true">↗</span></a>
     <form hx-post="/entries/{id}/favorite" hx-target="closest article" hx-swap="outerHTML">
       <input type="hidden" name="favorite" value="{favorite_value}">
       <button class="favorite" type="submit" aria-label="{favorite_label}">{favorite_mark} {favorite_label}</button>
@@ -236,9 +313,8 @@ fn render_entry(entry: &Entry) -> String {
         source_url = escape_attribute_url(&metadata.source.url),
         source_name = escape_html(&metadata.source.name),
         title = escape_html(&metadata.title),
-        summary = summary,
+        summary = escape_html(&summary),
         tags = tags,
-        body = render_markdown(&entry.body),
         favorite_value = favorite_value,
         favorite_mark = favorite_mark,
         favorite_label = favorite_label,
@@ -248,53 +324,30 @@ fn render_entry(entry: &Entry) -> String {
     )
 }
 
-fn render_markdown(markdown: &str) -> String {
-    let parser = Parser::new_ext(markdown, Options::ENABLE_STRIKETHROUGH).map(sanitize_event);
-    let mut rendered = String::new();
-    html::push_html(&mut rendered, parser);
-    rendered
-}
-
-fn sanitize_event(event: Event<'_>) -> Event<'_> {
-    match event {
-        Event::Html(value) | Event::InlineHtml(value) => Event::Text(value),
-        Event::Start(Tag::Link {
-            link_type,
-            dest_url,
-            title,
-            id,
-        }) => Event::Start(Tag::Link {
-            link_type,
-            dest_url: safe_markdown_url(dest_url),
-            title,
-            id,
-        }),
-        Event::Start(Tag::Image {
-            link_type,
-            dest_url,
-            title,
-            id,
-        }) => Event::Start(Tag::Image {
-            link_type,
-            dest_url: safe_markdown_url(dest_url),
-            title,
-            id,
-        }),
-        event => event,
+fn plain_text_summary(markdown: &str, maximum_characters: usize) -> String {
+    let mut text = String::new();
+    for event in Parser::new(markdown) {
+        match event {
+            Event::Text(value) | Event::Code(value) => {
+                if !text.is_empty() && !text.ends_with(char::is_whitespace) {
+                    text.push(' ');
+                }
+                text.push_str(&value);
+            }
+            Event::SoftBreak | Event::HardBreak => text.push(' '),
+            _ => {}
+        }
     }
-}
-
-fn safe_markdown_url(url: CowStr<'_>) -> CowStr<'_> {
-    let lowercase = url.trim().to_ascii_lowercase();
-    if lowercase.starts_with("https://")
-        || lowercase.starts_with("http://")
-        || lowercase.starts_with("mailto:")
-        || lowercase.starts_with('/')
-        || lowercase.starts_with('#')
-    {
-        url
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut characters = normalized.chars();
+    let excerpt = characters
+        .by_ref()
+        .take(maximum_characters)
+        .collect::<String>();
+    if characters.next().is_some() {
+        format!("{}…", excerpt.trim_end())
     } else {
-        CowStr::Borrowed("#")
+        excerpt
     }
 }
 
@@ -324,6 +377,13 @@ fn parse_form(body: &[u8]) -> Vec<(String, String)> {
             Some((percent_decode(key)?, percent_decode(value)?))
         })
         .collect()
+}
+
+fn query_value(path_with_query: &str, key: &str) -> Option<String> {
+    let query = path_with_query.split_once('?')?.1;
+    parse_form(query.as_bytes())
+        .into_iter()
+        .find_map(|(name, value)| (name == key).then_some(value))
 }
 
 fn percent_decode(value: &str) -> Option<String> {
@@ -491,9 +551,23 @@ mod tests {
     }
 
     #[test]
-    fn markdown_does_not_emit_raw_html_or_script_urls() {
-        let html = render_markdown("<script>alert(1)</script> [click](javascript:alert(1))");
-        assert!(html.contains("&lt;script&gt;"));
-        assert!(!html.contains("href=\"javascript:"));
+    fn derives_plain_text_summary_without_markup_or_link_targets() {
+        let summary = plain_text_summary(
+            "<script>alert(1)</script>\n\nIntro **bold** [click](javascript:alert(1))",
+            280,
+        );
+        assert_eq!(summary, "Intro bold click");
+    }
+
+    #[test]
+    fn channel_route_returns_summary_cards_for_matching_entries() {
+        let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/data");
+        let response = route("GET", "/?channel=technology", &[], &data);
+        let body = String::from_utf8(response.body.into_owned()).unwrap();
+        assert_eq!(response.status, 200);
+        assert!(body.contains("Git synchronization is viable"));
+        assert!(!body.contains("A file-backed reader running under Wasmtime"));
+        assert!(body.contains("Read original"));
+        assert!(!body.contains("entry-body"));
     }
 }

@@ -13,6 +13,7 @@ use time::format_description::well_known::Rfc3339;
 
 pub const ENTRY_FORMAT: &str = "plainfeed.entry/v1";
 pub const STATE_FORMAT: &str = "plainfeed.state/v1";
+pub const CHANNELS_FORMAT: &str = "plainfeed.channels/v1";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Source {
@@ -31,6 +32,21 @@ pub struct EntryMetadata {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Channel {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct ChannelFile {
+    format: String,
+    #[serde(default)]
+    channels: Vec<Channel>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,12 +119,16 @@ pub enum Error {
     },
     #[error("invalid entry id {id:?} in {path}")]
     InvalidId { path: PathBuf, id: String },
+    #[error("invalid channel id {id:?} in {path}")]
+    InvalidChannelId { path: PathBuf, id: String },
     #[error("entry id {id:?} does not match file name in {path}")]
     IdPathMismatch { path: PathBuf, id: String },
     #[error("invalid RFC 3339 timestamp {value:?} in {path}")]
     InvalidTimestamp { path: PathBuf, value: String },
     #[error("duplicate entry id {id:?}")]
     DuplicateId { id: String },
+    #[error("duplicate channel id {id:?}")]
+    DuplicateChannel { id: String },
     #[error("state entry id {actual:?} does not match {expected:?} in {path}")]
     StateIdMismatch {
         path: PathBuf,
@@ -163,6 +183,54 @@ impl Store {
                 .then_with(|| left.metadata.id.cmp(&right.metadata.id))
         });
         Ok(entries)
+    }
+
+    pub fn channels(&self) -> Result<Vec<Channel>, Error> {
+        let path = self.root.join("config/channels.toml");
+        let mut channels = match fs::read_to_string(&path) {
+            Ok(text) => {
+                let file: ChannelFile = toml::from_str(&text).map_err(|source| Error::Toml {
+                    path: path.clone(),
+                    source,
+                })?;
+                if file.format != CHANNELS_FORMAT {
+                    return Err(Error::UnsupportedFormat {
+                        path,
+                        actual: file.format,
+                        expected: CHANNELS_FORMAT,
+                    });
+                }
+                file.channels
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(source) => return Err(Error::Io { path, source }),
+        };
+
+        let mut ids = HashSet::new();
+        for channel in &channels {
+            validate_channel_id(&channel.id, &path)?;
+            if !ids.insert(channel.id.clone()) {
+                return Err(Error::DuplicateChannel {
+                    id: channel.id.clone(),
+                });
+            }
+        }
+
+        let mut inferred = HashSet::new();
+        for entry in self.entries()? {
+            for id in entry.metadata.channels {
+                if !ids.contains(&id) {
+                    inferred.insert(id);
+                }
+            }
+        }
+        let mut inferred = inferred.into_iter().collect::<Vec<_>>();
+        inferred.sort();
+        channels.extend(inferred.into_iter().map(|id| Channel {
+            label: channel_fallback_label(&id),
+            id,
+        }));
+        Ok(channels)
     }
 
     pub fn state(&self, entry_id: &str) -> Result<EntryState, Error> {
@@ -360,7 +428,11 @@ fn validate_metadata(path: &Path, metadata: &EntryMetadata) -> Result<(), Error>
             id: metadata.id.clone(),
         });
     }
-    validate_timestamp(&metadata.published, path)
+    validate_timestamp(&metadata.published, path)?;
+    for channel in &metadata.channels {
+        validate_channel_id(channel, path)?;
+    }
+    Ok(())
 }
 
 fn validate_id(id: &str, path: &Path) -> Result<(), Error> {
@@ -378,6 +450,45 @@ fn validate_id(id: &str, path: &Path) -> Result<(), Error> {
             id: id.to_owned(),
         })
     }
+}
+
+fn validate_channel_id(id: &str, path: &Path) -> Result<(), Error> {
+    let valid = !id.is_empty()
+        && id.len() <= 128
+        && !id.starts_with('/')
+        && !id.ends_with('/')
+        && id.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment.as_bytes()[0].is_ascii_alphanumeric()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::InvalidChannelId {
+            path: path.to_owned(),
+            id: id.to_owned(),
+        })
+    }
+}
+
+fn channel_fallback_label(id: &str) -> String {
+    id.rsplit('/')
+        .next()
+        .unwrap_or(id)
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut characters = part.chars();
+            match characters.next() {
+                Some(first) => first.to_uppercase().chain(characters).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn validate_timestamp(value: &str, path: &Path) -> Result<(), Error> {
@@ -438,6 +549,7 @@ id = "hello-wasi"
 title = "Hello, WASI"
 published = "2026-07-17T00:00:00Z"
 tags = ["rust", "wasi"]
+channels = ["technology", "projects/plainfeed"]
 source = { name = "Example", url = "https://example.com/hello" }
 +++
 
@@ -449,6 +561,10 @@ This is **file-backed** content.
         let entry = parse_entry(Path::new("hello-wasi.md"), ENTRY).unwrap();
         assert_eq!(entry.metadata.id, "hello-wasi");
         assert_eq!(entry.metadata.tags, ["rust", "wasi"]);
+        assert_eq!(
+            entry.metadata.channels,
+            ["technology", "projects/plainfeed"]
+        );
         assert_eq!(entry.body, "This is **file-backed** content.");
     }
 
@@ -538,5 +654,30 @@ producer_hint = "keep-me"
 
         let entries = Store::open(temporary.path()).entries().unwrap();
         assert_eq!(entries[0].metadata.id, "later-instant");
+    }
+
+    #[test]
+    fn loads_configured_and_inferred_channels() {
+        let temporary = tempfile::tempdir().unwrap();
+        let content = temporary.path().join("content");
+        let config = temporary.path().join("config");
+        fs::create_dir_all(&content).unwrap();
+        fs::create_dir_all(&config).unwrap();
+        fs::write(content.join("hello-wasi.md"), ENTRY).unwrap();
+        fs::write(
+            config.join("channels.toml"),
+            r#"format = "plainfeed.channels/v1"
+
+[[channels]]
+id = "technology"
+label = "Technology"
+"#,
+        )
+        .unwrap();
+
+        let channels = Store::open(temporary.path()).channels().unwrap();
+        assert_eq!(channels[0].label, "Technology");
+        assert_eq!(channels[1].id, "projects/plainfeed");
+        assert_eq!(channels[1].label, "Plainfeed");
     }
 }

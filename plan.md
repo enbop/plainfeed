@@ -146,8 +146,8 @@ preopened writable `/data` directory.
 
 ### 4. Deliver the reading experience
 
-Status: minimal timeline, safe Markdown rendering, read tracking, favorites,
-and comments implemented with server-rendered HTML and htmx.
+Status: summary timeline, channel filtering, read tracking, favorites, and
+comments implemented with server-rendered HTML and htmx.
 
 - Implement the timeline and entry views.
 - Add read, favorite, comment, and filtering interactions.

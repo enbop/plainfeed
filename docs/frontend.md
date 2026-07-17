@@ -3,10 +3,10 @@
 ## Choice
 
 Plainfeed v0.1 uses server-rendered HTML with
-[htmx 2.0.10](https://htmx.org/docs/) for form mutations and a small plain
-JavaScript `IntersectionObserver` for automatic read tracking. The htmx release
-file and license are vendored under `web/vendor`; the application never loads a
-CDN at runtime.
+[htmx 2.0.10](https://htmx.org/docs/) for form mutations and channel fragment
+navigation, plus a small plain JavaScript `IntersectionObserver` for automatic
+read tracking. The htmx release file and license are vendored under
+`web/vendor`; the application never loads a CDN at runtime.
 
 ## Why it fits
 
@@ -14,12 +14,15 @@ CDN at runtime.
 - The Rust server already owns parsing, state transitions, and HTML safety.
 - htmx can replace one entry card after a favorite or comment mutation, so the
   browser does not need a duplicate domain model.
+- Channel links progressively enhance from normal navigation to fast HTML
+  fragment swaps with browser-history updates.
 - It is dependency-free in the browser and needs no Node-based build system.
 - Server-rendered content remains readable if JavaScript is unavailable.
 
-The application-specific JavaScript is intentionally limited to the behavior
-HTML cannot express: marking an unread entry after at least 60 percent of the
-card has remained visible for 900 milliseconds.
+The timeline renders title, summary, tags, and a source link rather than the
+stored full body. Application-specific JavaScript is intentionally limited to
+the behavior HTML cannot express: marking an unread entry after at least 60
+percent of the card has remained visible for 900 milliseconds.
 
 ## Alternatives considered
 

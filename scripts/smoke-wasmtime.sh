@@ -46,6 +46,31 @@ case "$PAGE" in
   *"A file-backed reader running under Wasmtime"*) ;;
   *) echo "feed page did not contain the fixture entry" >&2; exit 1 ;;
 esac
+case "$PAGE" in
+  *"Read original"*) ;;
+  *) echo "feed page did not contain summary-card actions" >&2; exit 1 ;;
+esac
+case "$PAGE" in
+  *"Plainfeed treats files as the source of truth"*)
+    echo "feed page unexpectedly rendered the full entry body" >&2
+    exit 1
+    ;;
+  *) ;;
+esac
+
+TECHNOLOGY=$(curl --fail --silent \
+  "http://127.0.0.1:$PORT/fragments/feed?channel=technology")
+case "$TECHNOLOGY" in
+  *"Git synchronization is viable"*) ;;
+  *) echo "technology channel did not contain its fixture entry" >&2; exit 1 ;;
+esac
+case "$TECHNOLOGY" in
+  *"A file-backed reader running under Wasmtime"*)
+    echo "technology channel contained an entry from another channel" >&2
+    exit 1
+    ;;
+  *) ;;
+esac
 
 curl --fail --silent --head "http://127.0.0.1:$PORT/" >/dev/null
 

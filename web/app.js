@@ -25,7 +25,12 @@
   }, { threshold: [0.6] });
 
   function observeUnread(root = document) {
-    for (const card of root.querySelectorAll(".entry-card[data-unread='true']")) {
+    const selector = ".entry-card[data-unread='true']";
+    const cards = [
+      ...(root.matches?.(selector) ? [root] : []),
+      ...root.querySelectorAll(selector),
+    ];
+    for (const card of cards) {
       if (observed.has(card)) continue;
       observed.add(card);
       observer.observe(card);

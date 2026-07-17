@@ -7,8 +7,8 @@ or GitHub.
 
 The first usable slice supports:
 
-- A newest-first reading timeline.
-- Markdown bodies with raw HTML and unsafe link schemes neutralized.
+- A newest-first timeline of titles and summaries with explicit source links.
+- Fast channel switching for broad topics and project-specific streams.
 - Automatic read markers after an entry remains visible.
 - Favorites and plain-text personal comments.
 - Atomic state-file replacement.
@@ -20,13 +20,15 @@ The versioned protocol is documented in [`spec/v1.md`](spec/v1.md). In short:
 
 ```text
 data/
+├── config/channels.toml
 ├── content/2026/07/example-entry.md
 └── state/entries/example-entry.toml
 ```
 
-Content is producer-owned Markdown with TOML front matter. Mutable reader state
-is kept separately. `examples/data` is a complete fixture that can be copied as
-the starting point for a data repository.
+Content is producer-owned Markdown with TOML front matter. `channels` route an
+entry into curated navigation streams while `tags` remain open-ended metadata.
+Mutable reader state is kept separately. `examples/data` is a complete fixture
+that can be copied as the starting point for a data repository.
 
 ## Run with Wasmtime
 

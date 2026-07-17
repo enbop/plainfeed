@@ -1,0 +1,9 @@
+format = "plainfeed.channels/v1"
+
+[[channels]]
+id = "technology"
+label = "Technology"
+
+[[channels]]
+id = "projects/plainfeed"
+label = "Plainfeed"
