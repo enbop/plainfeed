@@ -63,8 +63,8 @@ External writers must follow the [producer contract](producer-contract.md).
 - Service runtime: `plainfeed-service.wasm` owns an Axum listener and runs the
   existing pull/publication policy as a non-`Send` local Tokio task. Wasmtime 46
   fixtures prove startup content activation and automatic state publication
-  without a host timer. The proxy reader and one-shot sync command remain
-  recovery-compatible fallbacks.
+  without a host timer. The one-shot sync command remains a manual recovery
+  tool; the proxy reader is no longer a deployment target.
 
 ## Runtime topology
 
@@ -79,8 +79,8 @@ plainfeed-service.wasm      wasmtime run
 
 The single-threaded runtime schedules Git networking independently of reader
 requests. The update lock still prevents reads during the short activation
-transition. `plainfeed-server.wasm` under `wasmtime serve` plus the host-timed
-`plainfeed-sync.wasm` remains a compatibility and recovery topology.
+transition. Plainfeed does not maintain a parallel `wasmtime serve` deployment
+topology.
 
 ## Repository contract
 

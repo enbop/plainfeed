@@ -10,20 +10,10 @@ RUSTFLAGS="--cfg tokio_unstable" cargo build --release \
   -p plainfeed-service --target wasm32-wasip2
 ```
 
-Provide the generic HTTPS remote URL and credentials through inherited guest
-environment variables. `PLAINFEED_GIT_USERNAME` and
-`PLAINFEED_GIT_PASSWORD` work for generic Basic authentication. A GitHub PAT
-may instead use `PLAINFEED_GITHUB_TOKEN`; it is never written to Git config or
-`.plainfeed/sync.toml`.
-
-Run the service. It performs the initial forced pull before entering its normal
-30-second scheduling loop; no host timer or second process is required:
+Run the service with only the data checkout preopened:
 
 ```sh
 wasmtime run \
-  --env PLAINFEED_REMOTE_URL \
-  --env PLAINFEED_GIT_USERNAME \
-  --env PLAINFEED_GIT_PASSWORD \
   -S inherit-network=y \
   -S allow-ip-name-lookup=y \
   --dir /path/to/plainfeed-data::/data \
@@ -31,12 +21,28 @@ wasmtime run \
   127.0.0.1:8080 /data
 ```
 
+On first access Plainfeed redirects to `/settings`. Enter the HTTPS Git remote
+and GitHub PAT there; the form stores them in
+`.plainfeed/service-settings.toml` and requests synchronization immediately.
+The token is stored as local plain text but is never rendered back into HTML,
+written to Git configuration, or committed by Plainfeed. Restrict access to the
+host data directory and the service itself.
+
+Environment variables remain an operational override. Generic Basic
+authentication uses `PLAINFEED_GIT_USERNAME` and `PLAINFEED_GIT_PASSWORD`; a
+GitHub PAT may use `PLAINFEED_GITHUB_TOKEN`. `PLAINFEED_REMOTE_URL` overrides
+the saved remote. Pass only the variables in use with Wasmtime's `--env` flag.
+
+The service performs an initial configuration check before entering its normal
+30-second scheduling loop; no host timer or second process is required. Saving
+settings wakes that same task with a forced cycle.
+
 The service publishes dirty reader state after 30 idle seconds or five minutes
 of continuous mutations. Without due state, it performs no Git network request
 until the last successful pull is at least five minutes old.
 
-The one-shot sync command remains available for offline status, manual recovery,
-and compatibility deployments:
+The one-shot sync command remains available for offline status and manual
+recovery:
 
 ```sh
 wasmtime run \
@@ -44,25 +50,8 @@ wasmtime run \
   target/wasm32-wasip2/release/plainfeed-sync.wasm status
 ```
 
-The host must preopen only the data checkout needed by the guest. Keep token
-files outside that checkout and unset credential environment variables after
-manual runs.
-
-## Compatibility mode
-
-The earlier `wasi:http/proxy` reader and host-scheduled sync command remain
-supported while the combined service matures:
-
-```sh
-RUSTFLAGS="--cfg tokio_unstable" cargo build --release \
-  -p plainfeed-sync --bin plainfeed-sync --target wasm32-wasip2
-cargo build --release -p plainfeed-server --target wasm32-wasip2
-```
-
-Run `plainfeed-sync.wasm force`, start `plainfeed_server.wasm` with
-`wasmtime serve`, and invoke `plainfeed-sync.wasm tick` every 30 seconds as
-documented by the older topology. Both modes share the same files, Git history,
-conflict policy, and recovery commands.
+The host must preopen only the data checkout needed by the guest. Unset
+credential environment variables after manual runs.
 
 ## Conflict recovery
 

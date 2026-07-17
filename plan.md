@@ -144,7 +144,7 @@ transitions implemented in `plainfeed-core`.
 
 Status: the primary service uses Axum and Tokio networking in one long-lived
 `wasm32-wasip2` command under Wasmtime 46. The earlier `wasi:http/proxy`
-component remains a compatibility fallback.
+experiment is no longer a supported deployment mode.
 
 - Compile the core and a minimal server target for the chosen WASI profile.
 - Run it under Wasmtime with a mounted content directory.

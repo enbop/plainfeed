@@ -30,7 +30,17 @@ pub fn handle_request(
     body: &[u8],
     data_root: &Path,
 ) -> Response {
-    route(method, path_with_query, body, data_root)
+    route(method, path_with_query, body, data_root, false)
+}
+
+/// Handle one request for the combined service, including its settings link.
+pub fn handle_service_request(
+    method: &str,
+    path_with_query: &str,
+    body: &[u8],
+    data_root: &Path,
+) -> Response {
+    route(method, path_with_query, body, data_root, true)
 }
 
 impl Response {
@@ -59,7 +69,13 @@ impl Response {
     }
 }
 
-fn route(method: &str, path_with_query: &str, body: &[u8], data_root: &Path) -> Response {
+fn route(
+    method: &str,
+    path_with_query: &str,
+    body: &[u8],
+    data_root: &Path,
+    show_settings: bool,
+) -> Response {
     let path = path_with_query.split('?').next().unwrap_or(path_with_query);
     if plainfeed_sync_core::update_is_locked(data_root)
         && (path == "/" || path == "/fragments/feed" || method == "POST")
@@ -72,8 +88,10 @@ fn route(method: &str, path_with_query: &str, body: &[u8], data_root: &Path) -> 
     }
     let selected_channel = query_value(path_with_query, "channel");
     match (method, path) {
-        ("GET", "/") => render_feed(data_root, selected_channel.as_deref(), false),
-        ("GET", "/fragments/feed") => render_feed(data_root, selected_channel.as_deref(), true),
+        ("GET", "/") => render_feed(data_root, selected_channel.as_deref(), false, show_settings),
+        ("GET", "/fragments/feed") => {
+            render_feed(data_root, selected_channel.as_deref(), true, show_settings)
+        }
         ("GET", "/app.js") => {
             Response::static_bytes("text/javascript; charset=utf-8", APP_JS.as_bytes())
         }
@@ -151,7 +169,12 @@ fn find_entry(store: &Store, id: &str) -> Result<Entry, StoreError> {
         .ok_or_else(|| StoreError::EntryNotFound(id.to_owned()))
 }
 
-fn render_feed(data_root: &Path, selected_channel: Option<&str>, fragment: bool) -> Response {
+fn render_feed(
+    data_root: &Path,
+    selected_channel: Option<&str>,
+    fragment: bool,
+    show_settings: bool,
+) -> Response {
     let store = Store::open(data_root);
     let conflict = plainfeed_sync_core::ConflictReport::read_from(data_root)
         .ok()
@@ -167,6 +190,13 @@ fn render_feed(data_root: &Path, selected_channel: Option<&str>, fragment: bool)
             if fragment {
                 return Response::text(200, "text/html; charset=utf-8", shell);
             }
+            let settings_link = if show_settings {
+                r#"<a class="settings-link" href="/settings" aria-label="Settings" title="Settings">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M19.1 13a7.7 7.7 0 0 0 0-2l2.1-1.6-2-3.4-2.5 1a8 8 0 0 0-1.7-1L14.6 3h-4l-.4 3a8 8 0 0 0-1.7 1L6 6 4 9.4 6.1 11a7.7 7.7 0 0 0 0 2L4 14.6 6 18l2.5-1a8 8 0 0 0 1.7 1l.4 3h4l.4-3a8 8 0 0 0 1.7-1l2.5 1 2-3.4L19.1 13ZM12.6 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z"/></svg>
+    </a>"#
+            } else {
+                ""
+            };
             let document = format!(
                 r#"<!doctype html>
 <html lang="en">
@@ -182,7 +212,7 @@ fn render_feed(data_root: &Path, selected_channel: Option<&str>, fragment: bool)
 <body hx-history="false">
   <header class="site-header">
     <a class="brand" href="/" aria-label="Plainfeed home">Plainfeed</a>
-    <p><strong>{}</strong> unread · <strong>{}</strong> total <span class="sync-summary">· {}</span></p>
+    <div class="header-status"><p><strong>{}</strong> unread · <strong>{}</strong> total <span class="sync-summary">· {}</span></p>{}</div>
   </header>
   {}
 </body>
@@ -190,6 +220,7 @@ fn render_feed(data_root: &Path, selected_channel: Option<&str>, fragment: bool)
                 unread,
                 entries.len(),
                 sync_summary,
+                settings_link,
                 shell
             );
             Response::text(200, "text/html; charset=utf-8", document)
@@ -632,7 +663,7 @@ mod tests {
         report.remote_tip = Some("bbb".to_owned());
         report.write_to(temporary.path()).unwrap();
 
-        let response = route("GET", "/", &[], temporary.path());
+        let response = route("GET", "/", &[], temporary.path(), false);
         let body = String::from_utf8(response.body.into_owned()).unwrap();
         assert_eq!(response.status, 200);
         assert!(body.contains("Synchronization needs attention"));
@@ -657,9 +688,15 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let _lock = plainfeed_sync_core::UpdateLock::acquire(temporary.path()).unwrap();
 
-        let feed = route("GET", "/", &[], temporary.path());
-        let mutation = route("POST", "/entries/example/read", &[], temporary.path());
-        let health = route("GET", "/health", &[], temporary.path());
+        let feed = route("GET", "/", &[], temporary.path(), false);
+        let mutation = route(
+            "POST",
+            "/entries/example/read",
+            &[],
+            temporary.path(),
+            false,
+        );
+        let health = route("GET", "/health", &[], temporary.path(), false);
 
         assert_eq!(feed.status, 503);
         assert_eq!(mutation.status, 503);
@@ -678,12 +715,25 @@ mod tests {
     #[test]
     fn channel_route_returns_summary_cards_for_matching_entries() {
         let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/data");
-        let response = route("GET", "/?channel=technology", &[], &data);
+        let response = route("GET", "/?channel=technology", &[], &data, false);
         let body = String::from_utf8(response.body.into_owned()).unwrap();
         assert_eq!(response.status, 200);
         assert!(body.contains("Git synchronization is viable"));
         assert!(!body.contains("A file-backed reader running under Wasmtime"));
         assert!(body.contains("Read original"));
         assert!(!body.contains("entry-body"));
+    }
+
+    #[test]
+    fn settings_link_is_only_exposed_by_the_combined_service() {
+        let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/data");
+        let compatibility = handle_request("GET", "/", &[], &data);
+        let service = handle_service_request("GET", "/", &[], &data);
+        let compatibility = String::from_utf8(compatibility.body.into_owned()).unwrap();
+        let service = String::from_utf8(service.body.into_owned()).unwrap();
+
+        assert!(!compatibility.contains("href=\"/settings\""));
+        assert!(service.contains("href=\"/settings\""));
+        assert!(service.contains("aria-label=\"Settings\""));
     }
 }

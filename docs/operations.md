@@ -58,10 +58,12 @@ scripts/plainfeed-native-git.sh fetch /path/to/plainfeed-data origin
 updates the worktree, local `main`, or remote repository. It reports whether a
 manual fast-forward is possible and lists changed managed paths.
 
-Never place a PAT in the remote URL, Git configuration, shell history, or the
-data checkout. Manual history repair is deliberately not automated: inspect
-the conflict, preserve `state/**`, produce one valid linear `main`, then use the
-acknowledge-and-force flow.
+Never place a PAT in the remote URL, Git configuration, tracked files, or shell
+history. The Web settings flow stores it only in the ignored local metadata
+file `.plainfeed/service-settings.toml`; protect that file through host
+filesystem and service-access permissions. Manual history repair is
+deliberately not automated: inspect the conflict, preserve `state/**`, produce
+one valid linear `main`, then use the acknowledge-and-force flow.
 
 ## Regression suites
 

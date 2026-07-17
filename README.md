@@ -50,15 +50,14 @@ wasmtime run \
 ```
 
 Open <http://127.0.0.1:8080/>. The guest owns its Tokio TCP listener and runs
-the synchronization loop in the same single-threaded runtime. It forces a pull
-at startup, evaluates local work every 30 seconds, pulls remote content at most
-every five minutes, and batches reader state for publication after 30 idle
-seconds or five minutes of continuous changes. No host timer is required.
-
-Set `PLAINFEED_REMOTE_URL` and the generic Git credentials or
-`PLAINFEED_GITHUB_TOKEN` described in [deployment.md](docs/deployment.md) for a
-synchronized data checkout. Without a configured remote the same service runs
-as a local-only reader.
+the synchronization loop in the same single-threaded runtime. On first access,
+the settings page asks for the HTTPS Git remote and GitHub PAT and persists them
+under `/data/.plainfeed/`. Saving wakes the internal synchronization task
+immediately. It otherwise evaluates local work every 30 seconds, pulls remote
+content at most every five minutes, and batches reader state for publication
+after 30 idle seconds or five minutes of continuous changes. No host timer is
+required. Environment overrides are described in
+[deployment.md](docs/deployment.md).
 
 Use a copy of `examples/data` if you do not want reader actions to modify the
 tracked fixture.

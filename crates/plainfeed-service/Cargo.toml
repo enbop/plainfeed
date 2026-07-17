@@ -6,11 +6,17 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+axum = { version = "0.8.9", default-features = false, features = ["form", "http1", "tokio"] }
 plainfeed-git.workspace = true
 plainfeed-server = { path = "../plainfeed-server", default-features = false }
 plainfeed-sync.workspace = true
 plainfeed-sync-core.workspace = true
 rustls-rustcrypto = "0.0.2-alpha"
+serde.workspace = true
+thiserror.workspace = true
 time.workspace = true
-tokio = { version = "1.52.4", features = ["net", "rt", "sync", "time"] }
+tokio = { version = "1.52.4", features = ["macros", "net", "rt", "sync", "time"] }
+toml.workspace = true
+
+[dev-dependencies]
+tempfile = "3.23.0"

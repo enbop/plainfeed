@@ -58,11 +58,9 @@ done
 RUSTFLAGS=--cfg=tokio_unstable cargo build --manifest-path "$ROOT/Cargo.toml" \
   -p plainfeed-service --target wasm32-wasip2
 
-PLAINFEED_REMOTE_URL="http://127.0.0.1:$GIT_PORT/repo.git"
 PLAINFEED_SYNC_TICK_SECONDS=1
-export PLAINFEED_REMOTE_URL PLAINFEED_SYNC_TICK_SECONDS
+export PLAINFEED_SYNC_TICK_SECONDS
 "$WASMTIME_BIN" run \
-  --env PLAINFEED_REMOTE_URL \
   --env PLAINFEED_SYNC_TICK_SECONDS \
   -S inherit-network=y \
   --dir "$LIVE::/data" \
@@ -79,6 +77,20 @@ until curl --fail --silent "http://127.0.0.1:$HTTP_PORT/health" >/dev/null; do
   fi
   sleep 0.1
 done
+
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  "http://127.0.0.1:$HTTP_PORT/")" = 307
+curl --fail --silent "http://127.0.0.1:$HTTP_PORT/settings" \
+  | grep -q 'Connect your data repository'
+curl --fail --silent --output /dev/null --request POST \
+  --data-urlencode "remote_url=http://127.0.0.1:$GIT_PORT/repo.git" \
+  "http://127.0.0.1:$HTTP_PORT/settings"
+grep -q "remote_url = \"http://127.0.0.1:$GIT_PORT/repo.git\"" \
+  "$LIVE/.plainfeed/service-settings.toml"
+if grep -q 'github_token' "$LIVE/.plainfeed/service-settings.toml"; then
+  echo "empty Web configuration unexpectedly persisted a token" >&2
+  exit 1
+fi
 
 attempt=0
 until test -f "$LIVE/content/2026/07/service-daemon-content.md"; do
@@ -101,6 +113,12 @@ fi
 curl --fail --silent --request POST --data "favorite=$FAVORITE" \
   "http://127.0.0.1:$HTTP_PORT/entries/20260717-wasip2-reader/favorite" \
   >/dev/null
+# Re-saving configuration must wake the internal task immediately. This also
+# keeps the integration suite fast instead of waiting for the normal idle
+# publication window.
+curl --fail --silent --output /dev/null --request POST \
+  --data-urlencode "remote_url=http://127.0.0.1:$GIT_PORT/repo.git" \
+  "http://127.0.0.1:$HTTP_PORT/settings"
 
 attempt=0
 while test "$(git --git-dir "$REMOTE" rev-parse refs/heads/main)" = "$CONTENT_HEAD"; do
@@ -136,4 +154,4 @@ kill "$GIT_PID"
 wait "$GIT_PID" 2>/dev/null || true
 GIT_PID=
 
-echo "Plainfeed autonomously pulled content and published state under $($WASMTIME_BIN -V)"
+echo "Plainfeed initialized through the Web UI, pulled content, and published state under $($WASMTIME_BIN -V)"
