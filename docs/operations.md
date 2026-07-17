@@ -47,6 +47,17 @@ git -C /path/to/plainfeed-data diff main -- content config state
 git -C /path/to/plainfeed-data fetch origin main
 ```
 
+The checked-in helper packages the non-destructive inspection and fetch subset:
+
+```sh
+scripts/plainfeed-native-git.sh inspect /path/to/plainfeed-data
+scripts/plainfeed-native-git.sh fetch /path/to/plainfeed-data origin
+```
+
+`fetch` writes only `refs/remotes/plainfeed-recovery/main`; neither action
+updates the worktree, local `main`, or remote repository. It reports whether a
+manual fast-forward is possible and lists changed managed paths.
+
 Never place a PAT in the remote URL, Git configuration, shell history, or the
 data checkout. Manual history repair is deliberately not automated: inspect
 the conflict, preserve `state/**`, produce one valid linear `main`, then use the
