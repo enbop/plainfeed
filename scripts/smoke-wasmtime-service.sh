@@ -27,6 +27,7 @@ RUSTFLAGS=--cfg=tokio_unstable cargo build --manifest-path "$ROOT/Cargo.toml" \
 "$WASMTIME_BIN" run \
   -S inherit-network=y \
   -S allow-ip-name-lookup=y \
+  --env PLAINFEED_REMOTE_URL= \
   --dir "$DATA::/data" \
   "$ROOT/target/wasm32-wasip2/debug/plainfeed-service.wasm" \
   "127.0.0.1:$PORT" /data >"$LOG" 2>&1 &
@@ -44,10 +45,22 @@ done
 
 PAGE=$(curl --fail --silent "http://127.0.0.1:$PORT/")
 case "$PAGE" in
-  *"Plainfeed"*"Git synchronization is viable"*) ;;
+  *"Plainfeed"*"Git synchronization is viable"*"The earlier experiment proved"*) ;;
   *) echo "Axum service did not render the reader feed" >&2; exit 1 ;;
 esac
+case "$PAGE" in
+  *"The Git experiment demonstrated"*)
+    echo "Axum feed unexpectedly rendered the full entry body" >&2
+    exit 1
+    ;;
+  *) ;;
+esac
+curl --fail --silent \
+  "http://127.0.0.1:$PORT/entries/20260716-git-wasi" \
+  | grep -q 'The Git experiment demonstrated'
 curl --fail --silent "http://127.0.0.1:$PORT/style.css" | grep -q 'site-header'
+curl --fail --silent --head "http://127.0.0.1:$PORT/style.css" \
+  | grep -qi '^cache-control: public, max-age=3600'
 curl --fail --silent --request POST --data 'favorite=false' \
   "http://127.0.0.1:$PORT/entries/20260716-git-wasi/favorite" \
   | grep -q '☆ Favorite'

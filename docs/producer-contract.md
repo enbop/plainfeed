@@ -4,6 +4,10 @@ This contract lets an AI agent or another collector add Plainfeed entries
 without coordinating through the reader server. It applies to the canonical
 `main` branch of a Plainfeed data repository.
 
+For a self-contained guide that can be copied into a data repository and used
+directly as an AI task contract, see
+[`PLAINFEED-CONTENT-GUIDE.md`](../PLAINFEED-CONTENT-GUIDE.md).
+
 ## Owned paths
 
 External producers may create and correct files only under `content/**`.

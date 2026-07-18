@@ -48,8 +48,8 @@ case "$PAGE" in
   *) echo "feed page did not contain the fixture entry" >&2; exit 1 ;;
 esac
 case "$PAGE" in
-  *"Read original"*) ;;
-  *) echo "feed page did not contain summary-card actions" >&2; exit 1 ;;
+  *"Plainfeed begins with a small end-to-end slice"*) ;;
+  *) echo "feed page did not render the fixture summary" >&2; exit 1 ;;
 esac
 case "$PAGE" in
   *"Plainfeed treats files as the source of truth"*)
@@ -57,6 +57,20 @@ case "$PAGE" in
     exit 1
     ;;
   *) ;;
+esac
+
+ARTICLE=$(curl --fail --silent \
+  "http://127.0.0.1:$PORT/entries/20260717-wasip2-reader")
+case "$ARTICLE" in
+  *"A file-backed reader running under Wasmtime"*"Plainfeed treats files as the source of truth"*) ;;
+  *) echo "entry page did not render the full Markdown article" >&2; exit 1 ;;
+esac
+
+ARTICLE_FRAGMENT=$(curl --fail --silent \
+  "http://127.0.0.1:$PORT/fragments/entries/20260717-wasip2-reader")
+case "$ARTICLE_FRAGMENT" in
+  *"Back to feed"*"Plainfeed treats files as the source of truth"*) ;;
+  *) echo "entry fragment did not render the reading view" >&2; exit 1 ;;
 esac
 
 TECHNOLOGY=$(curl --fail --silent \
@@ -74,6 +88,8 @@ case "$TECHNOLOGY" in
 esac
 
 curl --fail --silent --head "http://127.0.0.1:$PORT/" >/dev/null
+curl --fail --silent --head "http://127.0.0.1:$PORT/style.css" \
+  | grep -qi '^cache-control: public, max-age=3600'
 
 # Simulate a browser abandoning an asset response, then verify the component
 # remains healthy and did not panic on a closed output stream.

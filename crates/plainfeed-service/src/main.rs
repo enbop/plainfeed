@@ -13,6 +13,7 @@ use axum::http::{Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{any, get};
 use plainfeed_git::{Credentials, Remote};
+use plainfeed_server::{Reader, SettingsNotice, SettingsView};
 use plainfeed_sync::{
     PublishOutcome, SyncCommand, publish_state, run_pull_cycle, state_publication_is_due,
 };
@@ -30,6 +31,7 @@ const DEFAULT_SYNC_TICK: Duration = Duration::from_secs(30);
 struct AppState {
     data_root: Arc<PathBuf>,
     sync_commands: mpsc::UnboundedSender<SyncCommand>,
+    reader: Reader,
 }
 
 #[derive(Deserialize)]
@@ -69,6 +71,7 @@ async fn run(address: String, data_root: PathBuf) -> Result<(), Box<dyn Error>> 
     let state = AppState {
         data_root: Arc::new(data_root),
         sync_commands,
+        reader: Reader::builder().build(),
     };
     let sync_root = Arc::clone(&state.data_root);
     let sync_tick = sync_tick_duration();
@@ -102,7 +105,7 @@ async fn reader_request(
     } else {
         method.as_str()
     };
-    let response = plainfeed_server::handle_service_request(
+    let response = state.reader.handle_service_request(
         route_method,
         &uri.to_string(),
         &body,
@@ -117,7 +120,7 @@ async fn reader_request(
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, response.content_type)
-        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CACHE_CONTROL, response.cache_control)
         .body(response_body)
         .unwrap_or_else(|_| Response::new(Body::from("invalid response\n")))
 }
@@ -139,13 +142,14 @@ async fn settings_page(State(state): State<AppState>, uri: Uri) -> Response {
     let saved = uri
         .query()
         .is_some_and(|query| query.split('&').any(|field| field == "saved=1"));
-    settings_response(&state.data_root, saved, None, StatusCode::OK)
+    settings_response(&state.reader, &state.data_root, saved, None, StatusCode::OK)
 }
 
 async fn save_settings(State(state): State<AppState>, Form(form): Form<SettingsForm>) -> Response {
     let remote_url = form.remote_url.trim().to_owned();
     if remote_url.is_empty() {
         return settings_response(
+            &state.reader,
             &state.data_root,
             false,
             Some("Remote URL is required."),
@@ -154,6 +158,7 @@ async fn save_settings(State(state): State<AppState>, Form(form): Form<SettingsF
     }
     if Remote::new(remote_url.clone(), None).is_err() {
         return settings_response(
+            &state.reader,
             &state.data_root,
             false,
             Some("Remote URL must be a supported HTTP or HTTPS Git URL."),
@@ -176,6 +181,7 @@ async fn save_settings(State(state): State<AppState>, Form(form): Form<SettingsF
     let settings = ServiceSettings::new(remote_url, github_token);
     if settings.write_to(&state.data_root).is_err() {
         return settings_response(
+            &state.reader,
             &state.data_root,
             false,
             Some("Settings could not be written to the data directory."),
@@ -187,6 +193,7 @@ async fn save_settings(State(state): State<AppState>, Form(form): Form<SettingsF
 }
 
 fn settings_response(
+    reader: &Reader,
     data_root: &Path,
     saved: bool,
     error: Option<&str>,
@@ -208,19 +215,17 @@ fn settings_response(
         env::var("PLAINFEED_GITHUB_TOKEN").is_ok() || env::var("PLAINFEED_GIT_PASSWORD").is_ok();
     let stored_token = stored.as_ref().is_some_and(ServiceSettings::has_token);
     let notice = if saved {
-        "<p class=\"settings-notice is-success\" role=\"status\">Settings saved. Synchronization was requested immediately.</p>".to_owned()
+        Some(SettingsNotice {
+            message: "Settings saved. Synchronization was requested immediately.".to_owned(),
+            error: false,
+        })
     } else if let Some(error) = error {
-        format!(
-            "<p class=\"settings-notice is-error\" role=\"alert\">{}</p>",
-            escape_html(error)
-        )
+        Some(SettingsNotice {
+            message: error.to_owned(),
+            error: true,
+        })
     } else {
-        String::new()
-    };
-    let override_notice = if remote_from_environment.is_some() || token_from_environment {
-        "<p class=\"settings-hint\"><strong>Environment override active.</strong> Environment credentials or URL take priority until the service is restarted without them.</p>"
-    } else {
-        ""
+        None
     };
     let token_status = if token_from_environment {
         "Provided by the process environment"
@@ -229,56 +234,28 @@ fn settings_response(
     } else {
         "Not configured"
     };
-    let document = format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <title>Settings · Plainfeed</title>
-  <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-  <header class="site-header"><a class="brand" href="/">Plainfeed</a><a class="back-link" href="/">Back to feed</a></header>
-  <main class="settings-page">
-    <section class="settings-panel">
-      <p class="settings-kicker">Service configuration</p>
-      <h1>Connect your data repository</h1>
-      <p class="settings-intro">Plainfeed uses this Git remote for incoming content and reader-state publication.</p>
-      {notice}{override_notice}
-      <form class="settings-form" method="post" action="/settings">
-        <label for="remote-url">Remote URL</label>
-        <input id="remote-url" name="remote_url" type="url" value="{remote_url}" placeholder="https://github.com/owner/plainfeed-data.git" required spellcheck="false" autocomplete="url">
-        <p class="field-help">Use the HTTPS clone URL. Environment variable: <code>PLAINFEED_REMOTE_URL</code>.</p>
-        <label for="github-token">GitHub personal access token</label>
-        <input id="github-token" name="github_token" type="password" value="" placeholder="Leave blank to keep the current token" autocomplete="new-password">
-        <p class="field-help">Status: <strong>{token_status}</strong>. The saved token is never sent back to this page.</p>
-        <label class="checkbox-row"><input name="clear_token" type="checkbox" value="yes"> Remove the locally stored token</label>
-        <button class="primary-button" type="submit">Save and synchronize</button>
-      </form>
-      <aside class="settings-security"><strong>Local secret storage</strong><p>The token is stored as plain text in <code>/data/.plainfeed/service-settings.toml</code>. Keep the host data directory private and restrict its filesystem permissions.</p></aside>
-    </section>
-  </main>
-</body>
-</html>"#,
-        remote_url = escape_html(&remote_url),
-    );
+    let document = match reader.render_settings(&SettingsView {
+        remote_url,
+        token_status: token_status.to_owned(),
+        notice,
+        environment_override: remote_from_environment.is_some() || token_from_environment,
+    }) {
+        Ok(document) => document,
+        Err(error) => {
+            eprintln!("plainfeed renderer: {error}");
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(Body::from("plainfeed could not render settings\n"))
+                .unwrap_or_else(|_| Response::new(Body::from("invalid response\n")));
+        }
+    };
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from(document))
         .unwrap_or_else(|_| Response::new(Body::from("invalid response\n")))
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 async fn synchronization_loop(
@@ -424,12 +401,35 @@ mod tests {
         .write_to(temporary.path())
         .unwrap();
 
-        let response = settings_response(temporary.path(), false, None, StatusCode::OK);
+        let response = settings_response(
+            &Reader::default(),
+            temporary.path(),
+            false,
+            None,
+            StatusCode::OK,
+        );
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(!body.contains("plainfeed-test-secret"));
         assert!(body.contains("Stored locally"));
         assert!(body.contains("Leave blank to keep the current token"));
+    }
+
+    #[tokio::test]
+    async fn settings_page_escapes_rendered_errors() {
+        let temporary = tempfile::tempdir().unwrap();
+        let response = settings_response(
+            &Reader::default(),
+            temporary.path(),
+            false,
+            Some("invalid <script>alert(1)</script>"),
+            StatusCode::BAD_REQUEST,
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(body.contains("invalid &lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!body.contains("<script>alert(1)</script>"));
     }
 
     #[test]

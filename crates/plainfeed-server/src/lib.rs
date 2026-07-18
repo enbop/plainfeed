@@ -1,12 +1,20 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
+mod render;
+
 use plainfeed_core::{Channel, Entry, Error as StoreError, Store};
-use pulldown_cmark::{Event, Parser};
 use std::borrow::Cow;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+
+use render::{
+    ChannelView, ConflictView, EmptyFeed, EntryPageView, EntrySummaryView, EntryView, FeedPageView,
+    FeedView,
+};
+pub use render::{MaudRenderer, RenderError, Renderer, SettingsNotice, SettingsView};
 
 const APP_JS: &str = include_str!("../../../web/app.js");
 const STYLE_CSS: &str = include_str!("../../../web/style.css");
@@ -16,7 +24,94 @@ const HTMX_JS: &[u8] = include_bytes!("../../../web/vendor/htmx.min.js");
 pub struct Response {
     pub status: u16,
     pub content_type: &'static str,
+    pub cache_control: &'static str,
     pub body: Cow<'static, [u8]>,
+}
+
+#[derive(Clone)]
+pub struct Reader {
+    renderer: Arc<dyn Renderer>,
+}
+
+impl std::fmt::Debug for Reader {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Reader").finish_non_exhaustive()
+    }
+}
+
+impl Default for Reader {
+    fn default() -> Self {
+        ReaderBuilder::default().build()
+    }
+}
+
+impl Reader {
+    pub fn builder() -> ReaderBuilder {
+        ReaderBuilder::default()
+    }
+
+    pub fn handle_request(
+        &self,
+        method: &str,
+        path_with_query: &str,
+        body: &[u8],
+        data_root: &Path,
+    ) -> Response {
+        route_with_renderer(
+            method,
+            path_with_query,
+            body,
+            data_root,
+            false,
+            self.renderer.as_ref(),
+        )
+    }
+
+    pub fn handle_service_request(
+        &self,
+        method: &str,
+        path_with_query: &str,
+        body: &[u8],
+        data_root: &Path,
+    ) -> Response {
+        route_with_renderer(
+            method,
+            path_with_query,
+            body,
+            data_root,
+            true,
+            self.renderer.as_ref(),
+        )
+    }
+
+    pub fn render_settings(&self, view: &SettingsView) -> Result<String, RenderError> {
+        self.renderer.settings_page(view)
+    }
+}
+
+pub struct ReaderBuilder {
+    renderer: Arc<dyn Renderer>,
+}
+
+impl Default for ReaderBuilder {
+    fn default() -> Self {
+        Self {
+            renderer: Arc::new(MaudRenderer),
+        }
+    }
+}
+
+impl ReaderBuilder {
+    pub fn renderer(mut self, renderer: impl Renderer + 'static) -> Self {
+        self.renderer = Arc::new(renderer);
+        self
+    }
+
+    pub fn build(self) -> Reader {
+        Reader {
+            renderer: self.renderer,
+        }
+    }
 }
 
 /// Handle one reader request without depending on a particular HTTP runtime.
@@ -30,7 +125,7 @@ pub fn handle_request(
     body: &[u8],
     data_root: &Path,
 ) -> Response {
-    route(method, path_with_query, body, data_root, false)
+    Reader::default().handle_request(method, path_with_query, body, data_root)
 }
 
 /// Handle one request for the combined service, including its settings link.
@@ -40,7 +135,7 @@ pub fn handle_service_request(
     body: &[u8],
     data_root: &Path,
 ) -> Response {
-    route(method, path_with_query, body, data_root, true)
+    Reader::default().handle_service_request(method, path_with_query, body, data_root)
 }
 
 impl Response {
@@ -48,6 +143,7 @@ impl Response {
         Self {
             status,
             content_type,
+            cache_control: "no-store",
             body: Cow::Owned(body.into().into_bytes()),
         }
     }
@@ -56,6 +152,7 @@ impl Response {
         Self {
             status: 200,
             content_type,
+            cache_control: "public, max-age=3600",
             body: Cow::Borrowed(body),
         }
     }
@@ -64,11 +161,13 @@ impl Response {
         Self {
             status: 204,
             content_type: "text/plain; charset=utf-8",
+            cache_control: "no-store",
             body: Cow::Borrowed(&[]),
         }
     }
 }
 
+#[cfg(test)]
 fn route(
     method: &str,
     path_with_query: &str,
@@ -76,9 +175,32 @@ fn route(
     data_root: &Path,
     show_settings: bool,
 ) -> Response {
+    let renderer = MaudRenderer;
+    route_with_renderer(
+        method,
+        path_with_query,
+        body,
+        data_root,
+        show_settings,
+        &renderer,
+    )
+}
+
+fn route_with_renderer(
+    method: &str,
+    path_with_query: &str,
+    body: &[u8],
+    data_root: &Path,
+    show_settings: bool,
+    renderer: &dyn Renderer,
+) -> Response {
     let path = path_with_query.split('?').next().unwrap_or(path_with_query);
     if plainfeed_sync_core::update_is_locked(data_root)
-        && (path == "/" || path == "/fragments/feed" || method == "POST")
+        && (path == "/"
+            || path == "/fragments/feed"
+            || path.starts_with("/entries/")
+            || path.starts_with("/fragments/entries/")
+            || method == "POST")
     {
         return Response::text(
             503,
@@ -87,11 +209,29 @@ fn route(
         );
     }
     let selected_channel = query_value(path_with_query, "channel");
-    match (method, path) {
-        ("GET", "/") => render_feed(data_root, selected_channel.as_deref(), false, show_settings),
-        ("GET", "/fragments/feed") => {
-            render_feed(data_root, selected_channel.as_deref(), true, show_settings)
+    if method == "GET" {
+        if let Some(entry_id) = route_entry_id(path, "/entries/") {
+            return render_entry(data_root, entry_id, false, show_settings, renderer);
         }
+        if let Some(entry_id) = route_entry_id(path, "/fragments/entries/") {
+            return render_entry(data_root, entry_id, true, show_settings, renderer);
+        }
+    }
+    match (method, path) {
+        ("GET", "/") => render_feed(
+            data_root,
+            selected_channel.as_deref(),
+            false,
+            show_settings,
+            renderer,
+        ),
+        ("GET", "/fragments/feed") => render_feed(
+            data_root,
+            selected_channel.as_deref(),
+            true,
+            show_settings,
+            renderer,
+        ),
         ("GET", "/app.js") => {
             Response::static_bytes("text/javascript; charset=utf-8", APP_JS.as_bytes())
         }
@@ -102,12 +242,17 @@ fn route(
             Response::static_bytes("text/javascript; charset=utf-8", HTMX_JS)
         }
         ("GET", "/health") => Response::text(200, "text/plain; charset=utf-8", "ok\n"),
-        ("POST", _) => route_mutation(path, body, data_root),
+        ("POST", _) => route_mutation(path, body, data_root, renderer),
         _ => Response::text(404, "text/plain; charset=utf-8", "not found\n"),
     }
 }
 
-fn route_mutation(path: &str, body: &[u8], data_root: &Path) -> Response {
+fn route_entry_id<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let id = path.strip_prefix(prefix)?;
+    (!id.is_empty() && !id.contains('/')).then_some(id)
+}
+
+fn route_mutation(path: &str, body: &[u8], data_root: &Path, renderer: &dyn Renderer) -> Response {
     let Some(remainder) = path.strip_prefix("/entries/") else {
         return Response::text(404, "text/plain; charset=utf-8", "not found\n");
     };
@@ -150,7 +295,10 @@ fn route_mutation(path: &str, body: &[u8], data_root: &Path) -> Response {
     match result {
         Ok(None) => Response::no_content(),
         Ok(Some(entry_id)) => match find_entry(&store, entry_id) {
-            Ok(entry) => Response::text(200, "text/html; charset=utf-8", render_entry(&entry)),
+            Ok(entry) => match renderer.entry_fragment(&EntryView::from_entry(&entry)) {
+                Ok(html) => Response::text(200, "text/html; charset=utf-8", html),
+                Err(error) => render_error(error),
+            },
             Err(error) => server_error(error),
         },
         Err(StoreError::EntryNotFound(_)) => {
@@ -174,6 +322,7 @@ fn render_feed(
     selected_channel: Option<&str>,
     fragment: bool,
     show_settings: bool,
+    renderer: &dyn Renderer,
 ) -> Response {
     let store = Store::open(data_root);
     let conflict = plainfeed_sync_core::ConflictReport::read_from(data_root)
@@ -185,47 +334,65 @@ fn render_feed(
                 .iter()
                 .filter(|entry| entry.state.read_at.is_none())
                 .count();
-            let shell = render_feed_shell(&entries, &channels, selected_channel, conflict.as_ref());
-            let sync_summary = render_sync_summary(data_root);
-            if fragment {
-                return Response::text(200, "text/html; charset=utf-8", shell);
-            }
-            let settings_link = if show_settings {
-                r#"<a class="settings-link" href="/settings" aria-label="Settings" title="Settings">
-      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M19.1 13a7.7 7.7 0 0 0 0-2l2.1-1.6-2-3.4-2.5 1a8 8 0 0 0-1.7-1L14.6 3h-4l-.4 3a8 8 0 0 0-1.7 1L6 6 4 9.4 6.1 11a7.7 7.7 0 0 0 0 2L4 14.6 6 18l2.5-1a8 8 0 0 0 1.7 1l.4 3h4l.4-3a8 8 0 0 0 1.7-1l2.5 1 2-3.4L19.1 13ZM12.6 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z"/></svg>
-    </a>"#
+            let feed = build_feed_view(&entries, &channels, selected_channel, conflict.as_ref());
+            let rendered = if fragment {
+                renderer.feed_fragment(&feed)
             } else {
-                ""
+                renderer.feed_page(&FeedPageView {
+                    unread,
+                    total: entries.len(),
+                    sync_summary: render_sync_summary(data_root),
+                    show_settings,
+                    feed,
+                })
             };
-            let document = format!(
-                r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <title>Plainfeed</title>
-  <link rel="stylesheet" href="/style.css">
-  <script defer src="/vendor/htmx.min.js"></script>
-  <script defer src="/app.js"></script>
-</head>
-<body hx-history="false">
-  <header class="site-header">
-    <a class="brand" href="/" aria-label="Plainfeed home">Plainfeed</a>
-    <div class="header-status"><p><strong>{}</strong> unread · <strong>{}</strong> total <span class="sync-summary">· {}</span></p>{}</div>
-  </header>
-  {}
-</body>
-</html>"#,
-                unread,
-                entries.len(),
-                sync_summary,
-                settings_link,
-                shell
-            );
-            Response::text(200, "text/html; charset=utf-8", document)
+            match rendered {
+                Ok(html) => Response::text(200, "text/html; charset=utf-8", html),
+                Err(error) => render_error(error),
+            }
         }
         (Err(error), _) | (_, Err(error)) => server_error(error),
+    }
+}
+
+fn render_entry(
+    data_root: &Path,
+    entry_id: &str,
+    fragment: bool,
+    show_settings: bool,
+    renderer: &dyn Renderer,
+) -> Response {
+    let store = Store::open(data_root);
+    let entries = match store.entries() {
+        Ok(entries) => entries,
+        Err(error) => return server_error(error),
+    };
+    let unread = entries
+        .iter()
+        .filter(|entry| entry.state.read_at.is_none())
+        .count();
+    let total = entries.len();
+    let Some(entry) = entries
+        .into_iter()
+        .find(|entry| entry.metadata.id == entry_id)
+    else {
+        return Response::text(404, "text/plain; charset=utf-8", "entry not found\n");
+    };
+    let entry = EntryView::from_entry(&entry);
+    let rendered = if fragment {
+        renderer.entry_reader_fragment(&entry)
+    } else {
+        renderer.entry_page(&EntryPageView {
+            unread,
+            total,
+            sync_summary: render_sync_summary(data_root),
+            show_settings,
+            entry,
+        })
+    };
+    match rendered {
+        Ok(html) => Response::text(200, "text/html; charset=utf-8", html),
+        Err(error) => render_error(error),
     }
 }
 
@@ -261,19 +428,19 @@ fn render_sync_summary(data_root: &Path) -> String {
     }
 }
 
-fn render_feed_shell(
+fn build_feed_view(
     entries: &[Entry],
     channels: &[Channel],
     selected_channel: Option<&str>,
     conflict: Option<&plainfeed_sync_core::ConflictReport>,
-) -> String {
-    let mut navigation = channel_link("All", None, selected_channel, entries.len());
+) -> FeedView {
+    let mut navigation = vec![channel_view("All", None, selected_channel, entries.len())];
     for channel in channels {
         let count = entries
             .iter()
             .filter(|entry| entry.metadata.channels.contains(&channel.id))
             .count();
-        navigation.push_str(&channel_link(
+        navigation.push(channel_view(
             &channel.label,
             Some(&channel.id),
             selected_channel,
@@ -288,50 +455,36 @@ fn render_feed_shell(
                 .map(|channel| entry.metadata.channels.iter().any(|id| id == channel))
                 .unwrap_or(true)
         })
-        .collect::<Vec<_>>();
-    let cards = if visible.is_empty() {
-        let message = if selected_channel.is_some() {
-            "No entries in this channel."
+        .map(EntrySummaryView::from_entry)
+        .collect();
+    FeedView {
+        conflict: conflict.map(|report| ConflictView {
+            reason: report.reason.clone(),
+            local_base: report
+                .local_base
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned()),
+            remote_tip: report
+                .remote_tip
+                .clone()
+                .unwrap_or_else(|| "unknown".to_owned()),
+        }),
+        channels: navigation,
+        entries: visible,
+        empty: if selected_channel.is_some() {
+            EmptyFeed::Channel
         } else {
-            "Your feed is empty. Add a v1 Markdown entry under <code>content/</code>."
-        };
-        format!("<section class=\"empty\"><h2>Nothing here yet</h2><p>{message}</p></section>")
-    } else {
-        visible.into_iter().map(render_entry).collect::<String>()
-    };
-
-    let conflict = conflict.map(render_conflict_banner).unwrap_or_default();
-    format!(
-        r#"<section id="feed-shell" class="feed-shell">
-  {conflict}
-  <nav class="channel-tabs" aria-label="Feed channels">{navigation}</nav>
-  <main id="feed" class="feed">{cards}</main>
-</section>"#
-    )
+            EmptyFeed::All
+        },
+    }
 }
 
-fn render_conflict_banner(report: &plainfeed_sync_core::ConflictReport) -> String {
-    let local_base = report.local_base.as_deref().unwrap_or("unknown");
-    let remote_tip = report.remote_tip.as_deref().unwrap_or("unknown");
-    format!(
-        r#"<aside class="sync-conflict" role="alert">
-  <h2>Synchronization needs attention</h2>
-  <p>{}</p>
-  <dl><div><dt>Local base</dt><dd><code>{}</code></dd></div><div><dt>Remote tip</dt><dd><code>{}</code></dd></div></dl>
-  <p class="sync-conflict-help">The last valid feed remains available. Inspect <code>.plainfeed/conflict.toml</code>, repair the repository, acknowledge the report, and force synchronization.</p>
-</aside>"#,
-        escape_html(&report.reason),
-        escape_html(local_base),
-        escape_html(remote_tip),
-    )
-}
-
-fn channel_link(
+fn channel_view(
     label: &str,
     channel: Option<&str>,
     selected_channel: Option<&str>,
     count: usize,
-) -> String {
+) -> ChannelView {
     let selected = channel == selected_channel;
     let page_url = channel
         .map(|id| format!("/?channel={id}"))
@@ -339,143 +492,12 @@ fn channel_link(
     let fragment_url = channel
         .map(|id| format!("/fragments/feed?channel={id}"))
         .unwrap_or_else(|| "/fragments/feed".to_owned());
-    format!(
-        "<a class=\"channel-tab{}\" href=\"{}\" hx-get=\"{}\" hx-target=\"#feed-shell\" hx-swap=\"outerHTML\" hx-push-url=\"{}\"{}>{}<span>{}</span></a>",
-        if selected { " is-active" } else { "" },
-        escape_html(&page_url),
-        escape_html(&fragment_url),
-        escape_html(&page_url),
-        if selected {
-            " aria-current=\"page\""
-        } else {
-            ""
-        },
-        escape_html(label),
-        count
-    )
-}
-
-fn render_entry(entry: &Entry) -> String {
-    let metadata = &entry.metadata;
-    let state = &entry.state;
-    let unread = state.read_at.is_none();
-    let favorite_label = if state.favorite {
-        "Unfavorite"
-    } else {
-        "Favorite"
-    };
-    let favorite_value = if state.favorite { "false" } else { "true" };
-    let favorite_mark = if state.favorite { "★" } else { "☆" };
-    let tags = metadata
-        .tags
-        .iter()
-        .map(|tag| format!("<span class=\"tag\">{}</span>", escape_html(tag)))
-        .collect::<String>();
-    let summary = metadata
-        .summary
-        .as_ref()
-        .cloned()
-        .unwrap_or_else(|| plain_text_summary(&entry.body, 280));
-    let comments = if state.comments.is_empty() {
-        "<p class=\"no-comments\">No comments yet.</p>".to_owned()
-    } else {
-        state
-            .comments
-            .iter()
-            .map(|comment| {
-                format!(
-                    "<blockquote><p>{}</p><footer>{}</footer></blockquote>",
-                    escape_html(&comment.body).replace('\n', "<br>"),
-                    escape_html(&comment.created_at)
-                )
-            })
-            .collect::<String>()
-    };
-    format!(
-        r#"<article id="entry-{id}" class="entry-card{unread_class}" data-entry-id="{id}" data-unread="{unread}">
-  <header class="entry-header">
-    <div class="entry-meta"><span class="unread-dot" aria-label="Unread"></span><time datetime="{published}">{published}</time><span>·</span><span>{source_name}</span></div>
-    <h2><a href="{source_url}" rel="noreferrer">{title}</a></h2>
-    <p class="summary">{summary}</p>
-    <div class="tags">{tags}</div>
-  </header>
-  <footer class="entry-actions">
-    <a class="read-original" href="{source_url}" rel="noreferrer">Read original <span aria-hidden="true">↗</span></a>
-    <form hx-post="/entries/{id}/favorite" hx-target="closest article" hx-swap="outerHTML">
-      <input type="hidden" name="favorite" value="{favorite_value}">
-      <button class="favorite" type="submit" aria-label="{favorite_label}">{favorite_mark} {favorite_label}</button>
-    </form>
-    <details>
-      <summary>{comment_count} comment{comment_suffix}</summary>
-      <div class="comments">{comments}</div>
-      <form class="comment-form" hx-post="/entries/{id}/comments" hx-target="closest article" hx-swap="outerHTML">
-        <label for="comment-{id}">Add a personal comment</label>
-        <textarea id="comment-{id}" name="comment" rows="3" maxlength="4000" required></textarea>
-        <button type="submit">Save comment</button>
-      </form>
-    </details>
-  </footer>
-</article>"#,
-        id = escape_html(&metadata.id),
-        unread = unread,
-        unread_class = if unread { " is-unread" } else { "" },
-        published = escape_html(&metadata.published),
-        source_url = escape_attribute_url(&metadata.source.url),
-        source_name = escape_html(&metadata.source.name),
-        title = escape_html(&metadata.title),
-        summary = escape_html(&summary),
-        tags = tags,
-        favorite_value = favorite_value,
-        favorite_mark = favorite_mark,
-        favorite_label = favorite_label,
-        comment_count = state.comments.len(),
-        comment_suffix = if state.comments.len() == 1 { "" } else { "s" },
-        comments = comments,
-    )
-}
-
-fn plain_text_summary(markdown: &str, maximum_characters: usize) -> String {
-    let mut text = String::new();
-    for event in Parser::new(markdown) {
-        match event {
-            Event::Text(value) | Event::Code(value) => {
-                if !text.is_empty() && !text.ends_with(char::is_whitespace) {
-                    text.push(' ');
-                }
-                text.push_str(&value);
-            }
-            Event::SoftBreak | Event::HardBreak => text.push(' '),
-            _ => {}
-        }
-    }
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut characters = normalized.chars();
-    let excerpt = characters
-        .by_ref()
-        .take(maximum_characters)
-        .collect::<String>();
-    if characters.next().is_some() {
-        format!("{}…", excerpt.trim_end())
-    } else {
-        excerpt
-    }
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-fn escape_attribute_url(value: &str) -> String {
-    let lowercase = value.trim().to_ascii_lowercase();
-    if lowercase.starts_with("https://") || lowercase.starts_with("http://") {
-        escape_html(value)
-    } else {
-        "#".to_owned()
+    ChannelView {
+        label: label.to_owned(),
+        page_url,
+        fragment_url,
+        count,
+        selected,
     }
 }
 
@@ -544,6 +566,15 @@ fn bad_request(message: &str) -> Response {
     Response::text(400, "text/plain; charset=utf-8", format!("{message}\n"))
 }
 
+fn render_error(error: RenderError) -> Response {
+    eprintln!("plainfeed renderer: {error}");
+    Response::text(
+        500,
+        "text/plain; charset=utf-8",
+        "plainfeed could not render this page\n",
+    )
+}
+
 fn server_error(error: StoreError) -> Response {
     eprintln!("plainfeed: {error}");
     Response::text(
@@ -608,7 +639,10 @@ mod wasi_http {
                 "content-type".to_owned(),
                 response.content_type.as_bytes().to_vec(),
             ),
-            ("cache-control".to_owned(), b"no-store".to_vec()),
+            (
+                "cache-control".to_owned(),
+                response.cache_control.as_bytes().to_vec(),
+            ),
             (
                 "content-length".to_owned(),
                 content_length.to_string().into_bytes(),
@@ -652,6 +686,57 @@ wasip2::http::proxy::export!(Handler);
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
+    struct TestRenderer;
+
+    impl Renderer for TestRenderer {
+        fn feed_page(&self, _view: &FeedPageView) -> Result<String, RenderError> {
+            Ok("<main>custom reader</main>".to_owned())
+        }
+
+        fn feed_fragment(&self, _view: &FeedView) -> Result<String, RenderError> {
+            Ok("<main>custom fragment</main>".to_owned())
+        }
+
+        fn entry_page(&self, _view: &EntryPageView) -> Result<String, RenderError> {
+            Ok("<main>custom entry page</main>".to_owned())
+        }
+
+        fn entry_reader_fragment(&self, _view: &EntryView) -> Result<String, RenderError> {
+            Ok("<main>custom reader fragment</main>".to_owned())
+        }
+
+        fn entry_fragment(&self, _view: &EntryView) -> Result<String, RenderError> {
+            Ok("<article>custom entry</article>".to_owned())
+        }
+
+        fn settings_page(&self, _view: &SettingsView) -> Result<String, RenderError> {
+            Ok("<main>custom settings</main>".to_owned())
+        }
+    }
+
+    #[test]
+    fn reader_builder_selects_a_renderer_without_changing_routes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let reader = Reader::builder().renderer(TestRenderer).build();
+
+        let response = reader.handle_request("GET", "/", &[], temporary.path());
+        let body = String::from_utf8(response.body.into_owned()).unwrap();
+
+        assert_eq!(body, "<main>custom reader</main>");
+    }
+
+    #[test]
+    fn reader_builder_also_selects_the_entry_page_renderer() {
+        let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/data");
+        let reader = Reader::builder().renderer(TestRenderer).build();
+
+        let response = reader.handle_request("GET", "/entries/20260716-git-wasi", &[], &data);
+        let body = String::from_utf8(response.body.into_owned()).unwrap();
+
+        assert_eq!(body, "<main>custom entry page</main>");
+    }
+
     #[test]
     fn conflict_banner_keeps_the_last_valid_feed_available() {
         let temporary = tempfile::tempdir().unwrap();
@@ -684,11 +769,22 @@ mod tests {
     }
 
     #[test]
+    fn static_assets_are_cacheable_but_reader_pages_are_not() {
+        let temporary = tempfile::tempdir().unwrap();
+        let stylesheet = route("GET", "/style.css", &[], temporary.path(), false);
+        let page = route("GET", "/", &[], temporary.path(), false);
+
+        assert_eq!(stylesheet.cache_control, "public, max-age=3600");
+        assert_eq!(page.cache_control, "no-store");
+    }
+
+    #[test]
     fn data_routes_are_retryable_while_an_update_is_locked() {
         let temporary = tempfile::tempdir().unwrap();
         let _lock = plainfeed_sync_core::UpdateLock::acquire(temporary.path()).unwrap();
 
         let feed = route("GET", "/", &[], temporary.path(), false);
+        let entry = route("GET", "/entries/example", &[], temporary.path(), false);
         let mutation = route(
             "POST",
             "/entries/example/read",
@@ -699,29 +795,57 @@ mod tests {
         let health = route("GET", "/health", &[], temporary.path(), false);
 
         assert_eq!(feed.status, 503);
+        assert_eq!(entry.status, 503);
         assert_eq!(mutation.status, 503);
         assert_eq!(health.status, 200);
     }
 
     #[test]
-    fn derives_plain_text_summary_without_markup_or_link_targets() {
-        let summary = plain_text_summary(
-            "<script>alert(1)</script>\n\nIntro **bold** [click](javascript:alert(1))",
-            280,
-        );
-        assert_eq!(summary, "Intro bold click");
-    }
-
-    #[test]
-    fn channel_route_returns_summary_cards_for_matching_entries() {
+    fn channel_route_returns_summaries_for_matching_entries() {
         let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/data");
         let response = route("GET", "/?channel=technology", &[], &data, false);
         let body = String::from_utf8(response.body.into_owned()).unwrap();
         assert_eq!(response.status, 200);
         assert!(body.contains("Git synchronization is viable"));
         assert!(!body.contains("A file-backed reader running under Wasmtime"));
-        assert!(body.contains("Read original"));
-        assert!(!body.contains("entry-body"));
+        assert!(body.contains("The earlier experiment proved authenticated HTTPS"));
+        assert!(!body.contains("The Git experiment demonstrated"));
+        assert!(!body.contains("class=\"entry-body\""));
+        assert!(body.contains("href=\"/entries/20260716-git-wasi\""));
+        assert!(body.contains("hx-get=\"/fragments/entries/20260716-git-wasi\""));
+    }
+
+    #[test]
+    fn entry_route_supports_full_page_and_htmx_reader_fragment() {
+        let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/data");
+        let page = route("GET", "/entries/20260716-git-wasi", &[], &data, false);
+        let fragment = route(
+            "GET",
+            "/fragments/entries/20260716-git-wasi",
+            &[],
+            &data,
+            false,
+        );
+        let page = String::from_utf8(page.body.into_owned()).unwrap();
+        let fragment = String::from_utf8(fragment.body.into_owned()).unwrap();
+
+        assert!(page.starts_with("<!DOCTYPE html>"));
+        assert!(page.contains("The Git experiment demonstrated"));
+        assert!(page.contains("<h1>Git synchronization is viable"));
+        assert!(page.contains("id=\"reader-surface\""));
+        assert!(page.contains("data-history-back"));
+        assert!(fragment.contains("The Git experiment demonstrated"));
+        assert!(fragment.contains("Back to feed"));
+        assert!(!fragment.contains("<!DOCTYPE html>"));
+    }
+
+    #[test]
+    fn missing_entry_route_is_not_found() {
+        let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/data");
+        let response = route("GET", "/entries/not-here", &[], &data, false);
+
+        assert_eq!(response.status, 404);
+        assert_eq!(response.body.as_ref(), b"entry not found\n");
     }
 
     #[test]

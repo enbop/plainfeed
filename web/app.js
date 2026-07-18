@@ -39,4 +39,19 @@
 
   document.addEventListener("DOMContentLoaded", () => observeUnread());
   document.addEventListener("htmx:afterSwap", (event) => observeUnread(event.target));
+
+  document.addEventListener("click", (event) => {
+    const back = event.target.closest?.("[data-history-back]");
+    if (!back || !history.state?.htmx) return;
+    event.preventDefault();
+    event.stopPropagation();
+    history.back();
+  }, true);
+
+  document.addEventListener("htmx:afterSwap", (event) => {
+    const path = event.detail?.pathInfo?.requestPath;
+    if (path === "/fragments/feed" || path?.startsWith("/fragments/entries/")) {
+      window.scrollTo(0, 0);
+    }
+  });
 })();

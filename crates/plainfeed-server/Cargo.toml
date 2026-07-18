@@ -13,6 +13,7 @@ default = ["proxy-component"]
 proxy-component = ["dep:wasip2"]
 
 [dependencies]
+maud = "0.27.0"
 plainfeed-core.workspace = true
 plainfeed-sync-core.workspace = true
 pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }

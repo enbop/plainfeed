@@ -6,7 +6,7 @@ WASIp2 service under Wasmtime. It has no database and is not coupled to GitHub.
 
 The first usable slice supports:
 
-- A newest-first timeline of titles and summaries with explicit source links.
+- A newest-first title-and-summary timeline with dedicated Markdown reading views.
 - Fast channel switching for broad topics and project-specific streams.
 - Automatic read markers after an entry remains visible.
 - Favorites and plain-text personal comments.
@@ -28,6 +28,11 @@ Content is producer-owned Markdown with TOML front matter. `channels` route an
 entry into curated navigation streams while `tags` remain open-ended metadata.
 Mutable reader state is kept separately. `examples/data` is a complete fixture
 that can be copied as the starting point for a data repository.
+
+For AI research tasks and scheduled content producers, copy
+[`PLAINFEED-CONTENT-GUIDE.md`](PLAINFEED-CONTENT-GUIDE.md) into the root of the
+data repository and instruct the producer to read it before each run. It is a
+self-contained writing, deduplication, path-ownership, and validation contract.
 
 ## Run with Wasmtime
 
