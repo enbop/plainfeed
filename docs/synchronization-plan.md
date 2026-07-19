@@ -7,7 +7,8 @@ from WASI while preserving a deliberately narrow conflict model:
 
 - `main` is the only canonical branch.
 - External producers own `content/**`.
-- The repository owner owns `config/**`.
+- The repository owner owns `config/**`, `.gitignore`, and the exact root-level
+  `PLAINFEED-CONTENT-GUIDE.md` producer contract.
 - Plainfeed owns `state/**`.
 - `.plainfeed/**` is local synchronization metadata and is never committed.
 - The synchronizer never performs a general merge or rebase.

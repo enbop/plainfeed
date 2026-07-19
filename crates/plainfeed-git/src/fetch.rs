@@ -361,6 +361,20 @@ pub fn export_remote_snapshot(
                 export_tree(&tree, &output)?;
             }
         }
+        const CONTENT_GUIDE_PATH: &str = "PLAINFEED-CONTENT-GUIDE.md";
+        if let Some(entry) = root_tree.find_entry(CONTENT_GUIDE_PATH) {
+            if !matches!(entry.kind(), EntryKind::Blob | EntryKind::BlobExecutable) {
+                return Err(Error::Git(format!(
+                    "remote {CONTENT_GUIDE_PATH} path is not a file"
+                )));
+            }
+            let blob = entry.object().map_err(git_error)?.into_blob();
+            let output = temporary.join(CONTENT_GUIDE_PATH);
+            fs::write(&output, &blob.data).map_err(|source| Error::Io {
+                path: output,
+                source,
+            })?;
+        }
         fs::rename(&temporary, destination).map_err(|source| Error::Io {
             path: destination.to_owned(),
             source,
@@ -948,6 +962,7 @@ mod tests {
         let content = repository.write_blob(b"entry body\n").unwrap();
         let config = repository.write_blob(b"channel config\n").unwrap();
         let state = repository.write_blob(b"must not export\n").unwrap();
+        let guide = repository.write_blob(b"producer contract\n").unwrap();
         let mut editor = repository.edit_tree(repository.empty_tree().id).unwrap();
         editor
             .upsert("content/entry.md", EntryKind::Blob, content)
@@ -957,6 +972,9 @@ mod tests {
             .unwrap();
         editor
             .upsert("state/entries/private.toml", EntryKind::Blob, state)
+            .unwrap();
+        editor
+            .upsert("PLAINFEED-CONTENT-GUIDE.md", EntryKind::Blob, guide)
             .unwrap();
         let tree = editor.write().unwrap();
         let identity = gix::actor::SignatureRef {
@@ -987,6 +1005,10 @@ mod tests {
             "channel config\n"
         );
         assert!(!staging.join("state").exists());
+        assert_eq!(
+            std::fs::read_to_string(staging.join("PLAINFEED-CONTENT-GUIDE.md")).unwrap(),
+            "producer contract\n"
+        );
 
         let initial = temporary.path().join("staging/initial");
         export_initial_snapshot(repository.path(), &commit.to_string(), &initial).unwrap();

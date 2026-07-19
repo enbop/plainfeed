@@ -14,6 +14,7 @@ use thiserror::Error;
 pub const SYNC_FORMAT: &str = "plainfeed.sync/v1";
 pub const CONFLICT_FORMAT: &str = "plainfeed.conflict/v1";
 pub const PENDING_PUSH_FORMAT: &str = "plainfeed.pending-push/v1";
+pub const CONTENT_GUIDE_PATH: &str = "PLAINFEED-CONTENT-GUIDE.md";
 
 static MARKER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -43,6 +44,7 @@ pub fn path_owner(path: &Path) -> PathOwner {
         Some("content") => PathOwner::Producer,
         Some("config") => PathOwner::RepositoryOwner,
         Some(".gitignore") if remainder.is_empty() => PathOwner::RepositoryOwner,
+        Some(CONTENT_GUIDE_PATH) if remainder.is_empty() => PathOwner::RepositoryOwner,
         Some("state") => PathOwner::Plainfeed,
         Some(".plainfeed") => PathOwner::LocalOnly,
         _ => PathOwner::Unknown,
@@ -235,6 +237,10 @@ fn activate_staged_snapshot_internal(
             });
         }
     }
+    let staged_guide = canonical_staging.join(CONTENT_GUIDE_PATH);
+    if staged_guide.exists() && !staged_guide.is_file() {
+        return Err(Error::InvalidStaging { path: staged_guide });
+    }
     validate(&canonical_staging).map_err(|error| Error::Validation(error.to_string()))?;
 
     let _lock = UpdateLock::acquire(repository_root)?;
@@ -248,10 +254,10 @@ fn activate_staged_snapshot_internal(
     })?;
 
     let mut activated = Vec::new();
-    for area in ["content", "config"] {
-        let live = repository_root.join(area);
-        let staged = canonical_staging.join(area);
-        let previous = backup.join(area);
+    for path in ["content", "config", CONTENT_GUIDE_PATH] {
+        let live = repository_root.join(path);
+        let staged = canonical_staging.join(path);
+        let previous = backup.join(path);
         let had_previous = live.exists();
         if had_previous {
             fs::rename(&live, &previous).map_err(|source| Error::Io {
@@ -259,14 +265,16 @@ fn activate_staged_snapshot_internal(
                 source,
             })?;
         }
-        if let Err(source) = fs::rename(&staged, &live) {
-            if had_previous {
-                let _ = fs::rename(&previous, &live);
+        if staged.exists() {
+            if let Err(source) = fs::rename(&staged, &live) {
+                if had_previous {
+                    let _ = fs::rename(&previous, &live);
+                }
+                rollback_activation(repository_root, &canonical_staging, &backup, &activated);
+                return Err(Error::Io { path: live, source });
             }
-            rollback_activation(repository_root, &canonical_staging, &backup, &activated);
-            return Err(Error::Io { path: live, source });
         }
-        activated.push((area, had_previous));
+        activated.push((path, had_previous));
     }
 
     if let Err(error) = finalize() {
@@ -632,9 +640,10 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        AuditError, CONFLICT_FORMAT, ConflictReport, DirtyJournal, PathOwner, PendingPush,
-        SyncState, UpdateLock, activate_staged_snapshot, activate_staged_snapshot_with_finalize,
-        audit_plainfeed_changes, audit_remote_changes, path_owner,
+        AuditError, CONFLICT_FORMAT, CONTENT_GUIDE_PATH, ConflictReport, DirtyJournal, PathOwner,
+        PendingPush, SyncState, UpdateLock, activate_staged_snapshot,
+        activate_staged_snapshot_with_finalize, audit_plainfeed_changes, audit_remote_changes,
+        path_owner,
     };
 
     #[test]
@@ -645,6 +654,10 @@ mod tests {
         );
         assert_eq!(
             path_owner(Path::new("config/channels.toml")),
+            PathOwner::RepositoryOwner
+        );
+        assert_eq!(
+            path_owner(Path::new("PLAINFEED-CONTENT-GUIDE.md")),
             PathOwner::RepositoryOwner
         );
         assert_eq!(
@@ -663,13 +676,26 @@ mod tests {
     }
 
     #[test]
-    fn accepts_remote_content_and_config_with_the_trusted_state_tree() {
+    fn accepts_remote_content_config_and_the_producer_guide_with_the_trusted_state_tree() {
         audit_remote_changes(
-            ["content/new.md", "config/channels.toml"],
+            [
+                "content/new.md",
+                "config/channels.toml",
+                "PLAINFEED-CONTENT-GUIDE.md",
+            ],
             Some("state-tree-a"),
             Some("state-tree-a"),
         )
         .unwrap();
+
+        assert!(matches!(
+            audit_remote_changes(
+                ["OTHER-CONTENT-GUIDE.md"],
+                Some("state-tree-a"),
+                Some("state-tree-a")
+            ),
+            Err(AuditError::ForbiddenPath { .. })
+        ));
     }
 
     #[test]
@@ -823,6 +849,7 @@ mod tests {
         fs::create_dir_all(root.join("state/entries")).unwrap();
         fs::write(root.join("content/old/deleted.md"), "old").unwrap();
         fs::write(root.join("config/channels.toml"), "old config").unwrap();
+        fs::write(root.join(CONTENT_GUIDE_PATH), "old guide").unwrap();
         fs::write(root.join("state/entries/keep.toml"), "reader state").unwrap();
 
         let staging = root.join(".plainfeed/staging/remote-a");
@@ -830,6 +857,7 @@ mod tests {
         fs::create_dir_all(staging.join("config")).unwrap();
         fs::write(staging.join("content/new/entry.md"), "new").unwrap();
         fs::write(staging.join("config/channels.toml"), "new config").unwrap();
+        fs::write(staging.join(CONTENT_GUIDE_PATH), "new guide").unwrap();
 
         activate_staged_snapshot(root, &staging, |_| Ok::<_, &str>(())).unwrap();
 
@@ -845,6 +873,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("state/entries/keep.toml")).unwrap(),
             "reader state"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(CONTENT_GUIDE_PATH)).unwrap(),
+            "new guide"
         );
         assert!(!root.join(".plainfeed/update.lock").exists());
     }
@@ -889,11 +921,13 @@ mod tests {
         fs::create_dir_all(root.join("config")).unwrap();
         fs::write(root.join("content/entry.md"), "old content").unwrap();
         fs::write(root.join("config/channels.toml"), "old config").unwrap();
+        fs::write(root.join(CONTENT_GUIDE_PATH), "old guide").unwrap();
         let staging = root.join(".plainfeed/staging/remote-b");
         fs::create_dir_all(staging.join("content")).unwrap();
         fs::create_dir_all(staging.join("config")).unwrap();
         fs::write(staging.join("content/entry.md"), "new content").unwrap();
         fs::write(staging.join("config/channels.toml"), "new config").unwrap();
+        fs::write(staging.join(CONTENT_GUIDE_PATH), "new guide").unwrap();
 
         let result = activate_staged_snapshot_with_finalize(
             root,
@@ -910,6 +944,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("config/channels.toml")).unwrap(),
             "old config"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(CONTENT_GUIDE_PATH)).unwrap(),
+            "old guide"
         );
         assert_eq!(
             fs::read_to_string(staging.join("content/entry.md")).unwrap(),
