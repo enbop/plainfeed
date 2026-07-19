@@ -2,7 +2,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-SOURCE=${1:-$ROOT/refs/plainfeed-playground}
+SOURCE=${1:-$ROOT/refs/plainfeed-data-fixture}
 TEMPORARY=$(mktemp -d "${TMPDIR:-/tmp}/plainfeed-concurrent-state.XXXXXX")
 REMOTE="$TEMPORARY/remote.git"
 REPOSITORY="$TEMPORARY/repository"

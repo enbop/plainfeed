@@ -15,15 +15,15 @@ from WASI while preserving a deliberately narrow conflict model:
 - Ownership violations, history divergence, and genuine same-path conflicts
   stop synchronization for manual resolution.
 
-The first deployment target is `spore-bot/plainfeed-playground` over HTTPS with
-a repository-scoped token inherited by the WASI guest. GitHub is the initial
-test remote, not a storage-format dependency.
+The first deployment target is a private data repository over HTTPS with a
+repository-scoped token inherited by the WASI guest. GitHub is the initial test
+remote, not a storage-format dependency.
 
 External writers must follow the [producer contract](producer-contract.md).
 
 ## Implementation status
 
-- Phase 0: the canonical data layout is published at playground commit
+- Phase 0: the canonical data layout is published at test-data commit
   `ff2845b` and passes the reader's Wasmtime smoke test.
 - Phase 1: the provider-independent ownership audit, synchronization metadata,
   conflict report, dirty journal, and post-rename state markers are implemented
@@ -31,7 +31,7 @@ External writers must follow the [producer contract](producer-contract.md).
 - Phase 2: the production `plainfeed-git` crate performs bounded authenticated
   HTTPS fetches under Wasmtime, inspects the remote tip and state tree, and
   passes repeated-fetch, invalid-credential, untouched-worktree, and native
-  `git fsck --full` checks against the real playground repository.
+  `git fsck --full` checks against the hosted test repository.
 - Phase 3: fetched trees are audited, exported into ignored staging, fully
   validated, and activated behind an update lock while preserving state. The
   index and `main` advance with compare-and-swap finalization; validation or
@@ -75,7 +75,7 @@ The primary deployment is one long-lived WASI command:
 plainfeed-service.wasm      wasmtime run
   ├── Axum HTTP reader
   ├── Tokio synchronization loop
-  └── /data                 checkout of plainfeed-playground
+  └── /data                 checkout of the configured data repository
 ```
 
 The single-threaded runtime schedules Git networking independently of reader
@@ -123,7 +123,7 @@ Store human-readable, uncommitted status in `.plainfeed/sync.toml`:
 ```toml
 format = "plainfeed.sync/v1"
 remote = "origin"
-remote_url = "https://github.com/spore-bot/plainfeed-playground.git"
+remote_url = "https://github.com/example/plainfeed-data.git"
 branch = "refs/heads/main"
 last_remote_oid = "..."
 last_state_tree_oid = "..."
@@ -141,18 +141,18 @@ the sync leave newer markers behind, preventing a lost-dirty race.
 
 ### Phase 0: Establish the live data checkout
 
-1. Turn `plainfeed-playground` into the live data repository.
+1. Prepare a dedicated private repository as the live data repository.
 2. Remove or archive the probe-only files currently at its repository root.
 3. Move the current example content, channel configuration, and desired reader
    state into its canonical directories.
 4. Add `.plainfeed/` to the data repository's `.gitignore`.
 5. Confirm the initial remote `state/**` tree as the trusted state baseline.
 6. Stop mounting `plainfeed/examples/data` as writable live data.
-7. Mount the playground checkout as `/data` and rerun the reader smoke test.
+7. Mount the data checkout as `/data` and rerun the reader smoke test.
 
 Exit criteria:
 
-- Reader actions change only the playground checkout.
+- Reader actions change only the data checkout.
 - The source repository stays clean while the reader is used.
 - Native Git can validate and push the initial data repository.
 
@@ -177,7 +177,7 @@ Exit criteria:
 1. Create a narrow `plainfeed-git` adapter around the proven gix/WASI transport.
 2. Pin the required gitoxide and memmap2 compatibility revisions; keep Reqwest
    unmodified with the injected WASIp2 DNS resolver.
-3. Verify authenticated upload-pack/fetch against the private playground
+3. Verify authenticated upload-pack/fetch against a private test
    repository; the earlier experiment proved authenticated receive-pack/push
    but did not complete this production pull path.
 4. Fetch `origin/main`, persist objects, and inspect the remote tree without

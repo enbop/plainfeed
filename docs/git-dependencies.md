@@ -5,8 +5,8 @@ commit IDs in Cargo manifests:
 
 | Dependency | Public fork branch | Pinned revision | Upstream base |
 | --- | --- | --- | --- |
-| Gitoxide | [`spore-bot/gitoxide:plainfeed/wasip2`](https://github.com/spore-bot/gitoxide/tree/plainfeed/wasip2) | `7b4c806ed6175f21cc4d813ffcb197df95452197` | `402babdf82d6709c6a8c804e07138a8a004c54af` |
-| memmap2 | [`spore-bot/memmap2:plainfeed/wasip2`](https://github.com/spore-bot/memmap2/tree/plainfeed/wasip2) | `7163e105159cb9e95d952e42d390e36ccd83e5c1` | `7d76ad3157383db5670fd7e012f44de42aa7444b` |
+| Gitoxide | [`enbop/gitoxide:plainfeed/wasip2`](https://github.com/enbop/gitoxide/tree/plainfeed/wasip2) | `7b4c806ed6175f21cc4d813ffcb197df95452197` | `402babdf82d6709c6a8c804e07138a8a004c54af` |
+| memmap2 | [`enbop/memmap2-rs:plainfeed/wasip2`](https://github.com/enbop/memmap2-rs/tree/plainfeed/wasip2) | `7163e105159cb9e95d952e42d390e36ccd83e5c1` | `7d76ad3157383db5670fd7e012f44de42aa7444b` |
 
 Reqwest is an unmodified crates.io dependency. A normal Plainfeed build no
 longer needs ignored source checkouts or a patch-application bootstrap step.
@@ -30,7 +30,7 @@ pack, and total repository-size limits.
 Do not make changes on the fork's default branch and do not open an upstream PR
 as part of routine Plainfeed dependency maintenance. Work on
 `plainfeed/wasip2`, keep upstream as a read-only remote, and push explicitly to
-the `spore-bot` fork. After testing, update every Cargo `rev`, regenerate
+the `enbop` fork. After testing, update every Cargo `rev`, regenerate
 `Cargo.lock`, and rerun the full native and Wasmtime regression suites.
 
 Upstream contributions are a separate, explicit task. If authorized, split the

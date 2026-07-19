@@ -32,11 +32,11 @@ prepare() {
 mkdir -p "$ROOT/refs"
 prepare \
   gitoxide \
-  https://github.com/spore-bot/gitoxide.git \
+  https://github.com/enbop/gitoxide.git \
   "$ROOT/refs/gitoxide" \
   "$GITOXIDE_REVISION"
 prepare \
   memmap2 \
-  https://github.com/spore-bot/memmap2.git \
+  https://github.com/enbop/memmap2-rs.git \
   "$ROOT/refs/memmap2" \
   "$MEMMAP2_REVISION"

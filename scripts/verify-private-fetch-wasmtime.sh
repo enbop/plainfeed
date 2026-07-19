@@ -9,7 +9,8 @@ fi
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 PAT_FILE=$1
 EXPECTED_CHECKOUT=$2
-REMOTE=https://github.com/spore-bot/plainfeed-playground.git
+: "${PLAINFEED_TEST_REMOTE_URL:?set PLAINFEED_TEST_REMOTE_URL to the HTTPS test repository}"
+REMOTE=$PLAINFEED_TEST_REMOTE_URL
 WASM="$ROOT/target/wasm32-wasip2/debug/plainfeed-fetch.wasm"
 DATA=$(mktemp -d "/tmp/plainfeed-private-fetch.XXXXXX")
 LOG="$DATA/fetch.log"

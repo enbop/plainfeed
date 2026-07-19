@@ -6,7 +6,7 @@ published = "2026-07-17T00:30:00Z"
 summary = "Plainfeed begins with a small end-to-end slice."
 tags = ["plainfeed", "rust", "wasi"]
 channels = ["projects/plainfeed"]
-source = { name = "Plainfeed", url = "https://github.com/spore-bot/plainfeed" }
+source = { name = "Plainfeed", url = "https://github.com/enbop/plainfeed" }
 +++
 
 Plainfeed treats files as the source of truth. An automated producer can add a

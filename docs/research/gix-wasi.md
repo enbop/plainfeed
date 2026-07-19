@@ -36,10 +36,10 @@ wasmtime 43.0.0 (be23469ec 2026-03-20)
 target: wasm32-wasip2
 gix: 0.85.0
 gitoxide source: 402babd (2026-07-15)
-gitoxide compatibility fork: spore-bot/gitoxide 7b4c806
+gitoxide compatibility fork: enbop/gitoxide 7b4c806
 reqwest: crates.io 0.13.4, unmodified
 memmap2 source: 7d76ad3 (v0.9.11)
-memmap2 compatibility fork: spore-bot/memmap2 7163e10
+memmap2 compatibility fork: enbop/memmap2-rs 7163e10
 tokio: 1.52.3 with --cfg tokio_unstable
 rustls: 0.23.42
 rustls-rustcrypto: 0.0.2-alpha
@@ -47,9 +47,9 @@ rustls-rustcrypto: 0.0.2-alpha
 
 The initial experiment used ignored `refs/gitoxide` and `refs/memmap2` source
 checkouts. The production build now consumes exact commits from the public
-`spore-bot` compatibility forks over HTTPS. `refs/reqwest` remains only as
+`enbop` compatibility forks over HTTPS. `refs/reqwest` remains only as
 historical reference material and is not used by the build. The writable remote
-fixture is available through the ignored `refs/plainfeed-playground` path.
+fixture is available through the ignored `refs/plainfeed-data-fixture` path.
 
 ## Capability Results
 
@@ -72,7 +72,7 @@ fixture is available through the ignored `refs/plainfeed-playground` path.
 | SSH/file transport in the guest | Not viable | Existing transports invoke external processes, which WASI does not provide. |
 | Push porcelain | Fail | Gitoxide's upstream status documents general push and send-pack/receive-pack client plumbing as incomplete. |
 | Constrained smart-HTTP push | Conditional pass | A Plainfeed probe pushed one SHA-1 fast-forward commit with a complete, non-delta pack under Wasmtime to both a local receive-pack fixture and GitHub, then parsed `report-status`. |
-| Host-side SSH synchronization | Pass | Native Git pushed the Wasmtime-generated commit to `spore-bot/plainfeed-playground`. |
+| Host-side SSH synchronization | Pass | Native Git pushed the Wasmtime-generated commit to a private test repository. |
 
 ## Verified Local Write
 
@@ -141,10 +141,8 @@ successfully without OS threads or a Reqwest fork.
 
 The unmodified-Reqwest path completed an HTTPS advertisement request, a public
 fetch with pack/index persistence, private PAT authentication, and a real
-GitHub push under Wasmtime. The verification push advanced
-`spore-bot/plainfeed-playground` to
-`1fac0661e7d8e99bd8979fc9ef92f322573a2157`; an independent SSH fetch and
-native `git fsck --full` passed.
+GitHub push under Wasmtime. An independent SSH fetch observed the resulting
+commit, and native `git fsck --full` passed.
 
 ### 5. Replace read-only memory maps with buffered reads
 
@@ -266,7 +264,7 @@ remote independently, after which the first client refused its stale update
 before uploading a pack because its new commit no longer had the advertised
 remote tip as its parent.
 
-The same Wasmtime binary then pushed to GitHub's private playground over HTTPS
+The same Wasmtime binary then pushed to a private GitHub test repository over HTTPS
 with a repository-scoped fine-grained PAT inherited through
 `PLAINFEED_GITHUB_TOKEN`. The first authenticated handshake exposed a protocol
 compatibility detail: GitHub honors `Git-Protocol: version=1` by prepending a
@@ -279,7 +277,6 @@ clients; fetch continues to request protocol v2.
 The verified GitHub result was:
 
 ```text
-repository=spore-bot/plainfeed-playground
 old=a053378778382055381965fae2989313e3e76283
 new=2aa41c7a9058e40c0dc922bc8b950f949760eb17
 pack_bytes=450
@@ -328,7 +325,7 @@ the reader and local file history should continue to work.
   advertised remote tip, then add server-rejection fixtures.
 - Define the exact ownership boundary between the guest and host for commits.
 - Add a host synchronization protocol with locking and conflict reporting.
-- Test fetch/reconciliation with concurrent agent changes in the playground.
+- Test fetch/reconciliation with concurrent agent changes in the test data repository.
 - Decide whether the constrained push should become a maintained Plainfeed
   adapter, an upstream contribution, or remain a research probe.
 

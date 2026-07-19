@@ -2,7 +2,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-SOURCE=${1:-$ROOT/refs/plainfeed-playground}
+SOURCE=${1:-$ROOT/refs/plainfeed-data-fixture}
 PORT=${PLAINFEED_CONFLICT_GIT_PORT:-18086}
 TEMPORARY=$(mktemp -d "${TMPDIR:-/tmp}/plainfeed-conflicts.XXXXXX")
 WASM="$ROOT/target/wasm32-wasip2/debug/plainfeed-sync.wasm"

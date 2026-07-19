@@ -2,7 +2,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-SOURCE=${1:-$ROOT/refs/plainfeed-playground}
+SOURCE=${1:-$ROOT/refs/plainfeed-data-fixture}
 READER_PORT=${PLAINFEED_RACE_READER_PORT:-18084}
 GIT_PORT=${PLAINFEED_RACE_GIT_PORT:-18085}
 ADVANCES=${PLAINFEED_RACE_ADVANCES:-1}

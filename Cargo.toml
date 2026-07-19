@@ -15,7 +15,7 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/spore-bot/plainfeed"
+repository = "https://github.com/enbop/plainfeed"
 
 [workspace.dependencies]
 plainfeed-core = { path = "crates/plainfeed-core" }
@@ -28,4 +28,4 @@ time = { version = "0.3.44", features = ["formatting", "parsing"] }
 toml = "0.9.8"
 
 [patch.crates-io]
-memmap2 = { git = "https://github.com/spore-bot/memmap2.git", rev = "7163e105159cb9e95d952e42d390e36ccd83e5c1" }
+memmap2 = { git = "https://github.com/enbop/memmap2-rs.git", rev = "7163e105159cb9e95d952e42d390e36ccd83e5c1" }

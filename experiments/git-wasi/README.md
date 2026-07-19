@@ -97,7 +97,7 @@ For a reproducible loopback test, prepare a bare remote and client clone, then
 run the fixture server:
 
 ```bash
-git clone --bare refs/plainfeed-playground /tmp/plainfeed-push-remote.git
+git clone --bare refs/plainfeed-data-fixture /tmp/plainfeed-push-remote.git
 git clone /tmp/plainfeed-push-remote.git /tmp/plainfeed-push-client
 python3 experiments/git-wasi/support/git-smart-http-server.py \
   /tmp/plainfeed-push-remote.git --port 18080
@@ -133,8 +133,7 @@ wasmtime run \
 unset PLAINFEED_GITHUB_TOKEN
 ```
 
-Authenticated GitHub push was verified against
-`spore-bot/plainfeed-playground`. Commit
+Authenticated GitHub push was verified against a private test repository. Commit
 `2aa41c7a9058e40c0dc922bc8b950f949760eb17` was created and pushed entirely by
 the Wasmtime guest, then independently verified through an SSH fetch and
 native `git fsck --full`.

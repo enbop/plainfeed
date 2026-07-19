@@ -8,8 +8,10 @@ fi
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 PAT_FILE=$1
-REMOTE=https://github.com/spore-bot/plainfeed-playground.git
-SSH_REMOTE=git@github.com:spore-bot/plainfeed-playground.git
+: "${PLAINFEED_TEST_REMOTE_URL:?set PLAINFEED_TEST_REMOTE_URL to the HTTPS test repository}"
+: "${PLAINFEED_TEST_SSH_REMOTE_URL:?set PLAINFEED_TEST_SSH_REMOTE_URL to the SSH test repository}"
+REMOTE=$PLAINFEED_TEST_REMOTE_URL
+SSH_REMOTE=$PLAINFEED_TEST_SSH_REMOTE_URL
 PORT=${PLAINFEED_PUSH_TEST_PORT:-18083}
 TEMPORARY=$(mktemp -d "${TMPDIR:-/tmp}/plainfeed-state-push.XXXXXX")
 REPOSITORY="$TEMPORARY/repository"

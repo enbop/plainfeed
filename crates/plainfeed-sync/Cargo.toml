@@ -15,5 +15,5 @@ time.workspace = true
 tokio = { version = "1.52.3", features = ["net", "rt", "time"] }
 
 [dev-dependencies]
-gix = { git = "https://github.com/spore-bot/gitoxide.git", rev = "7b4c806ed6175f21cc4d813ffcb197df95452197", default-features = false, features = ["index", "sha1", "tree-editor"] }
+gix = { git = "https://github.com/enbop/gitoxide.git", rev = "7b4c806ed6175f21cc4d813ffcb197df95452197", default-features = false, features = ["index", "sha1", "tree-editor"] }
 tempfile = "3.23.0"

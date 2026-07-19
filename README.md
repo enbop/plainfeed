@@ -1,5 +1,10 @@
 # Plainfeed
 
+[![CI](https://github.com/enbop/plainfeed/actions/workflows/ci.yml/badge.svg)](https://github.com/enbop/plainfeed/actions/workflows/ci.yml)
+
+> Plainfeed is an early-stage personal project. Its data format is versioned,
+> but deployment and synchronization behavior may still change before 1.0.
+
 Plainfeed is a personal, file-first information stream and reading server. It
 serves Markdown entries, records reader state in TOML, and runs as a long-lived
 WASIp2 service under Wasmtime. It has no database and is not coupled to GitHub.
@@ -82,6 +87,17 @@ The smoke test builds the WASIp2 component, serves a temporary copy of the
 fixture, exercises the page plus read/favorite/comment mutations over HTTP, and
 checks the resulting TOML state.
 
+## Releases
+
+Version tags publish `plainfeed-service.wasm`, a sibling-file
+`plainfeed.fungi.md`, and `SHA256SUMS` through GitHub Releases. Download all
+three files into one directory, verify the checksums, and apply the service:
+
+```bash
+sha256sum --check SHA256SUMS
+fungi service apply plainfeed ./plainfeed.fungi.md --start --yes
+```
+
 ## Frontend choice
 
 The first UI uses vendored htmx 2.0.10 and a small plain JavaScript read
@@ -101,3 +117,8 @@ web/                      # Static progressive-enhancement assets
 examples/data/            # Example content and state repository
 experiments/              # Independent Git/WASI research
 ```
+
+## License
+
+Plainfeed is available under the [MIT License](LICENSE). Development is
+AI-assisted and the corresponding commits retain explicit attribution.

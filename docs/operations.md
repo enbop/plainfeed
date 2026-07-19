@@ -87,3 +87,8 @@ one valid linear `main`, then use the acknowledge-and-force flow.
 - `scripts/verify-conflict-fixtures-wasmtime.sh` covers remote state,
   unexpected paths, invalid content, missing `main`, divergent history, and
   their manual recovery procedures.
+
+Tests that access a hosted private repository require
+`PLAINFEED_TEST_REMOTE_URL`; the state-push test additionally requires
+`PLAINFEED_TEST_SSH_REMOTE_URL`. Neither repository address nor its token is
+stored in this source repository.

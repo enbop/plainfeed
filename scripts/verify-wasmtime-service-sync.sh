@@ -2,7 +2,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-SOURCE=${1:-$ROOT/refs/plainfeed-playground}
+SOURCE=${1:-$ROOT/refs/plainfeed-data-fixture}
 WASMTIME_BIN=${WASMTIME_BIN:-wasmtime}
 HTTP_PORT=${PLAINFEED_SERVICE_HTTP_PORT:-18093}
 GIT_PORT=${PLAINFEED_SERVICE_GIT_PORT:-18094}

@@ -110,7 +110,7 @@ mod tests {
     fn settings_round_trip_without_writing_outside_local_metadata() {
         let temporary = tempfile::tempdir().unwrap();
         let settings = ServiceSettings::new(
-            "https://github.com/spore-bot/plainfeed-playground.git".to_owned(),
+            "https://github.com/example/plainfeed-data.git".to_owned(),
             Some("secret-token".to_owned()),
         );
         settings.write_to(temporary.path()).unwrap();

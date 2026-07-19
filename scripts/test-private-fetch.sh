@@ -8,6 +8,8 @@ fi
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 TOKEN_FILE=$1
+: "${PLAINFEED_TEST_REMOTE_URL:?set PLAINFEED_TEST_REMOTE_URL to the HTTPS test repository}"
+REMOTE=$PLAINFEED_TEST_REMOTE_URL
 TEMPORARY=$(mktemp -d "${TMPDIR:-/tmp}/plainfeed-private-fetch.XXXXXX")
 
 cleanup() {
@@ -35,7 +37,7 @@ run_fetch() {
     -S allow-ip-name-lookup=y \
     --dir "$TEMPORARY::/sync" \
     "$ROOT/target/wasm32-wasip2/debug/plainfeed-fetch.wasm" \
-    https://github.com/spore-bot/plainfeed-playground.git \
+    "$REMOTE" \
     "$REPOSITORY"
 }
 

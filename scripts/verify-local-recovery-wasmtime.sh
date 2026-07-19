@@ -2,7 +2,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-SOURCE=${1:-$ROOT/refs/plainfeed-playground}
+SOURCE=${1:-$ROOT/refs/plainfeed-data-fixture}
 TEMPORARY=$(mktemp -d "${TMPDIR:-/tmp}/plainfeed-local-recovery.XXXXXX")
 REPOSITORY="$TEMPORARY/repository"
 

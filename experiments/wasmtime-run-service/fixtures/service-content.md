@@ -9,7 +9,7 @@ tags = ["wasi", "axum", "sync"]
 
 [source]
 name = "Plainfeed service fixture"
-url = "https://github.com/spore-bot/plainfeed"
+url = "https://github.com/enbop/plainfeed"
 +++
 
 This entry is committed after the live checkout is cloned. The combined

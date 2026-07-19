@@ -10,7 +10,8 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 PAT_FILE=$1
 DATA_CHECKOUT=$2
 EXPECTED_CHECKOUT=${3:-$DATA_CHECKOUT}
-REMOTE=https://github.com/spore-bot/plainfeed-playground.git
+: "${PLAINFEED_TEST_REMOTE_URL:?set PLAINFEED_TEST_REMOTE_URL to the HTTPS test repository}"
+REMOTE=$PLAINFEED_TEST_REMOTE_URL
 WASM="$ROOT/target/wasm32-wasip2/debug/plainfeed-sync.wasm"
 TEMPORARY=$(mktemp -d /tmp/plainfeed-sync-command.XXXXXX)
 REPOSITORY="$TEMPORARY/repository"

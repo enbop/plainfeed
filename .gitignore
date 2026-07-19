@@ -4,4 +4,5 @@
 __pycache__/
 *.pyc
 /.local-plan.md
+/.plainfeed/
 /examples/data/.plainfeed/
