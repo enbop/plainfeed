@@ -23,7 +23,7 @@ use settings::ServiceSettings;
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 
-const DEFAULT_ADDRESS: &str = "127.0.0.1:8080";
+const DEFAULT_ADDRESS: &str = "127.0.0.1:18437";
 const MAX_REQUEST_BODY: usize = 64 * 1024;
 const DEFAULT_SYNC_TICK: Duration = Duration::from_secs(30);
 

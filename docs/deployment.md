@@ -17,7 +17,7 @@ wasmtime run \
   -S allow-ip-name-lookup=y \
   --dir /path/to/plainfeed-data::/data \
   target/wasm32-wasip2/release/plainfeed-service.wasm \
-  127.0.0.1:8080 /data
+  127.0.0.1:18437 /data
 ```
 
 The host data path may be an empty directory or an existing valid Plainfeed Git

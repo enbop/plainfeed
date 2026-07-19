@@ -51,10 +51,10 @@ wasmtime run \
   -S allow-ip-name-lookup=y \
   --dir /path/to/plainfeed-data::/data \
   target/wasm32-wasip2/release/plainfeed-service.wasm \
-  127.0.0.1:8080 /data
+  127.0.0.1:18437 /data
 ```
 
-Open <http://127.0.0.1:8080/>. The guest owns its Tokio TCP listener and runs
+Open <http://127.0.0.1:18437/>. The guest owns its Tokio TCP listener and runs
 the synchronization loop in the same single-threaded runtime. On first access,
 the settings page asks for the HTTPS Git remote and GitHub PAT and persists them
 under `/data/.plainfeed/`. The host path may be a completely empty directory:
