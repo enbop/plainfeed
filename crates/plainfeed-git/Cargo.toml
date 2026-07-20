@@ -6,16 +6,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-futures-util = "0.3.31"
-gix = { git = "https://github.com/enbop/gitoxide.git", rev = "7b4c806ed6175f21cc4d813ffcb197df95452197", default-features = false, features = ["async-network-client", "index", "sha1", "tree-editor"] }
-gix-pack = { git = "https://github.com/enbop/gitoxide.git", rev = "7b4c806ed6175f21cc4d813ffcb197df95452197", default-features = false, features = ["generate", "sha1"] }
-hickory-resolver = { version = "0.26.1", default-features = false, features = ["tokio"] }
-once_cell = "1.21.3"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
+git-wasip2.workspace = true
 rustls-rustcrypto = "0.0.2-alpha"
-thiserror.workspace = true
 tokio = { version = "1.52.3", features = ["net", "rt", "time"] }
-url = "2.5.8"
-
-[dev-dependencies]
-tempfile = "3.23.0"

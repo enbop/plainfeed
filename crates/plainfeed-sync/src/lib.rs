@@ -923,6 +923,7 @@ fn restore_sync_state(
 mod tests {
     use std::fs;
 
+    use git_wasip2::test_gix as gix;
     use gix::{bstr::ByteSlice, objs::tree::EntryKind};
 
     use super::{

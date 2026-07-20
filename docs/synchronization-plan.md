@@ -174,9 +174,9 @@ Exit criteria:
 
 ### Phase 2: Integrate authenticated pull-only Git
 
-1. Create a narrow `plainfeed-git` adapter around the proven gix/WASI transport.
-2. Pin the required gitoxide and memmap2 compatibility revisions; keep Reqwest
-   unmodified with the injected WASIp2 DNS resolver.
+1. Keep `plainfeed-git` as a narrow policy adapter around `git-wasip2`.
+2. Pin `git-wasip2`; let it transitively pin the required Gitoxide and memmap2
+   compatibility revisions while keeping Reqwest unmodified.
 3. Verify authenticated upload-pack/fetch against a private test
    repository; the earlier experiment proved authenticated receive-pack/push
    but did not complete this production pull path.

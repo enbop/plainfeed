@@ -2,7 +2,8 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-GITOXIDE_REVISION=7b4c806ed6175f21cc4d813ffcb197df95452197
+GIT_WASIP2_REVISION=97ce8071124ba296a5eba827ccfc63836c58f33e
+GITOXIDE_REVISION=283374581e2c8fa2fea28079e1f284a1b0c7fbfc
 MEMMAP2_REVISION=7163e105159cb9e95d952e42d390e36ccd83e5c1
 
 prepare() {
@@ -30,6 +31,11 @@ prepare() {
 }
 
 mkdir -p "$ROOT/refs"
+prepare \
+  git-wasip2 \
+  https://github.com/enbop/git-wasip2.git \
+  "$ROOT/refs/git-wasip2" \
+  "$GIT_WASIP2_REVISION"
 prepare \
   gitoxide \
   https://github.com/enbop/gitoxide.git \

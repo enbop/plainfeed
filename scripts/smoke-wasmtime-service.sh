@@ -22,14 +22,14 @@ mkdir -p "$DATA"
 cp -R "$ROOT/examples/data/." "$DATA/"
 
 RUSTFLAGS=--cfg=tokio_unstable cargo build --manifest-path "$ROOT/Cargo.toml" \
-  -p plainfeed-service --target wasm32-wasip2
+  --locked --release -p plainfeed-service --target wasm32-wasip2
 
 "$WASMTIME_BIN" run \
   -S inherit-network=y \
   -S allow-ip-name-lookup=y \
   --env PLAINFEED_REMOTE_URL= \
   --dir "$DATA::/data" \
-  "$ROOT/target/wasm32-wasip2/debug/plainfeed-service.wasm" \
+  "$ROOT/target/wasm32-wasip2/release/plainfeed-service.wasm" \
   "127.0.0.1:$PORT" /data >"$LOG" 2>&1 &
 PID=$!
 

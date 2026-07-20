@@ -47,7 +47,9 @@ rustls-rustcrypto: 0.0.2-alpha
 
 The initial experiment used ignored `refs/gitoxide` and `refs/memmap2` source
 checkouts. The production build now consumes exact commits from the public
-`enbop` compatibility forks over HTTPS. `refs/reqwest` remains only as
+`enbop` compatibility forks over HTTPS through the standalone `git-wasip2`
+crate. Plainfeed depends only on `git-wasip2`; that crate pins Gitoxide, whose
+compatibility branch pins memmap2. `refs/reqwest` remains only as
 historical reference material and is not used by the build. The writable remote
 fixture is available through the ignored `refs/plainfeed-data-fixture` path.
 
